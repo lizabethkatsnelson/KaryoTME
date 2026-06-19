@@ -1,3 +1,5 @@
+<img width="2474" height="696" alt="KaryoTME" src="https://github.com/user-attachments/assets/123e58ce-4c64-4708-ab7e-a3d041642241" />
+
 # KaryoTME (Karyotype-driven modulation of the Tumor Microenvironment) 
 A multi-omics pan-cancer pipeline to identify key somatic copy number alterations (SCNAs) driving cancer immune evasion 
 
