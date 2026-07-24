@@ -1,0 +1,260 @@
+```{r}
+###########################################################################
+###########################################################################
+###                                                                     ###
+###                            FIGURE S2.1 AB                           ###
+###                                                                     ###
+###########################################################################
+###########################################################################
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+# --------------------------------------------------
+# Tumor group mapping
+# --------------------------------------------------
+tumor_group_map <- c(
+  "Gyn" = "UCEC.MSI", "Gyn" = "UCEC.MSS", "Gyn" = "OV",
+  "Squamous" = "CESC", "Squamous" = "LUSC", "Squamous" = "HNSC.HPVneg", "Squamous" = "ESCA.SC", "Squamous" = "BLCA",
+  "Adeno" = "BRCA.pos", "Adeno" = "BRCA.neg", "Adeno" = "PRAD", "Adeno" = "LUAD", "Adeno" = "LIHC",
+  "GI" = "COADREAD.MSI", "GI" = "COADREAD.MSS", "GI" = "ESCA.AD", "GI" = "STAD", "GI" = "PAAD",
+  "Kidney" = "KICH", "Kidney" = "KIRC", "Kidney" = "KIRP",
+  "NC-Derived" = "GBM", "NC-Derived" = "LGG", "NC-Derived" = "SKCM", "NC-Derived" = "UVM",
+  "Other" = "ACC", "Other" = "MESO", "Other" = "PCPG", "Other" = "SARC", "Other" = "TGCT", "Other" = "UCS"
+)
+
+##################################################
+## global settings
+##################################################
+legend_pos   <- c(0.77, 0.85)
+arm_limit_y  <- c(0, 12)
+cyto_limit_y <- c(0, 300)
+
+##################################################
+## arm-level input
+##################################################
+arm_hit <- read.csv("./input/linear_regression_Outputs_armlvl.csv", row.names = 1)
+
+arm_hit <- arm_hit %>%
+  group_by(TumorType) %>%
+  mutate(BH = p.adjust(P_val, method = "BH")) %>%
+  ungroup()
+
+arm_hit$hit_value <- arm_hit$cnv_status * arm_hit$X.signedlog.P.adj.
+arm_hit$hit_group <- ifelse(arm_hit$hit_value > 0, "hot", "cold")
+arm_hit$EventType <- ifelse(arm_hit$cnv_status > 0, "Gain", "Loss")
+
+arm_hit$tumor_group <- unlist(
+  sapply(arm_hit$TumorType, function(x) {
+    res <- names(tumor_group_map)[tumor_group_map == x]
+    if (length(res) == 0) {
+      res <- "not in group"
+    }
+    return(res)
+  })
+)
+
+arm_hit <- arm_hit[arm_hit$tumor_group != "not in group", ]
+arm_hit$tumor_group <- factor(arm_hit$tumor_group)
+arm_hit <- arm_hit[arm_hit$BH < 0.2, ]
+
+##################################################
+## cytoband-level input
+##################################################
+cyto_hit <- read.csv("input/linear_regression_Outputs_cytobandlvl.csv", row.names = 1)
+
+cyto_hit <- cyto_hit %>%
+  group_by(TumorType) %>%
+  mutate(BH = p.adjust(P_val, method = "BH")) %>%
+  ungroup()
+
+cyto_hit$hit_value <- cyto_hit$cnv_status * cyto_hit$X.signedlog.P.adj.
+cyto_hit$hit_group <- ifelse(cyto_hit$hit_value > 0, "hot", "cold")
+cyto_hit$EventType <- ifelse(cyto_hit$cnv_status > 0, "Gain", "Loss")
+
+cyto_hit$tumor_group <- unlist(
+  sapply(cyto_hit$TumorType, function(x) {
+    res <- names(tumor_group_map)[tumor_group_map == x]
+    if (length(res) == 0) {
+      res <- "not in group"
+    }
+    return(res)
+  })
+)
+
+cyto_hit <- cyto_hit[cyto_hit$tumor_group != "not in group", ]
+cyto_hit$tumor_group <- factor(cyto_hit$tumor_group)
+cyto_hit <- cyto_hit[cyto_hit$BH < 0.2, ]
+
+##################################################
+## helper plotting function
+##################################################
+MakeSpecialBarplot <- function(
+    df,
+    arm_col = "Arm",
+    special_gain = "Arm1q",
+    special_loss = "Arm9p",
+    title = "",
+    ylim_use = c(0, 10),
+    ylab_use = "Number of SCNAs") {
+  ##################################################
+  ## define subgroup colors
+  ##################################################
+  df$EventSub <- "Other"
+  df$EventSub[
+    df$EventType == "Gain" &
+      df[[arm_col]] == special_gain
+  ] <- "1q Gain"
+  df$EventSub[
+    df$EventType == "Loss" &
+      df[[arm_col]] == special_loss
+  ] <- "9p Loss"
+  df$EventSub[
+    df$EventType == "Gain" &
+      df$EventSub == "Other"
+  ] <- "Other Gain"
+  df$EventSub[
+    df$EventType == "Loss" &
+      df$EventSub == "Other"
+  ] <- "Other Loss"
+
+  ##################################################
+  ## summarize
+  ##################################################
+  plot_df <- df %>%
+    dplyr::count(tumor_group, EventType, EventSub)
+
+  ##################################################
+  ## manual dodge positions
+  ##################################################
+  tumor_levels <- levels(df$tumor_group)
+  plot_df$tumor_group <- factor(plot_df$tumor_group, levels = tumor_levels)
+  plot_df$x_base <- as.numeric(plot_df$tumor_group)
+  plot_df$x_pos <- ifelse(
+    plot_df$EventType == "Gain",
+    plot_df$x_base - 0.22,
+    plot_df$x_base + 0.22
+  )
+
+  ##################################################
+  ## plotting
+  ##################################################
+  p <- ggplot(
+    plot_df,
+    aes(x = x_pos, y = n, fill = EventSub)
+  ) +
+    geom_col(width = 0.38, position = "stack") +
+    scale_x_continuous(
+      breaks = seq_along(tumor_levels),
+      labels = tumor_levels
+    ) +
+    scale_fill_manual(
+      values = c(
+        "1q Gain"    = "#B00020",
+        "Other Gain" = "#F4A3A3",
+        "9p Loss"    = "#0B3D91",
+        "Other Loss" = "#AFC0F0"
+      )
+    ) +
+    theme_bw() +
+    xlab("") +
+    ylim(ylim_use) +
+    ylab(ylab_use) +
+    ggtitle(title) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 18),
+      legend.position = legend_pos,
+      legend.text = element_text(size = 15),
+      legend.direction = "horizontal",
+      legend.box = "vertical",
+      legend.title = element_blank(),
+      axis.title.y = element_text(size = 20),
+      plot.title = element_text(size = 20)
+    ) +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+  return(p)
+}
+
+##################################################
+## immune cold
+##################################################
+arm_hit_cold  <- arm_hit[arm_hit$hit_group == "cold", ]
+cyto_hit_cold <- cyto_hit[cyto_hit$hit_group == "cold", ]
+
+##################################################
+## arm-level cold
+##################################################
+sp2_1a_arm <- MakeSpecialBarplot(
+  df = arm_hit_cold,
+  arm_col = "Arm",
+  special_gain = "Arm1q",
+  special_loss = "Arm9p",
+  title = "Immune Cold SCNA events (Arm-Level) p.adj < 0.2",
+  ylim_use = arm_limit_y,
+  ylab_use = "Number of Arm SCNAs"
+)
+
+##################################################
+## cytoband-level cold
+##################################################
+sp2_1a_cyto <- MakeSpecialBarplot(
+  df = cyto_hit_cold,
+  arm_col = "ChrArm",
+  special_gain = "1q",
+  special_loss = "9p",
+  title = "Immune Cold SCNA events (Cytoband-Level) p.adj < 0.2",
+  ylim_use = cyto_limit_y,
+  ylab_use = "Number of Cytoband SCNAs"
+)
+
+##################################################
+## immune hot
+##################################################
+arm_hit_hot  <- arm_hit[arm_hit$hit_group == "hot", ]
+cyto_hit_hot <- cyto_hit[cyto_hit$hit_group == "hot", ]
+
+##################################################
+## arm-level hot
+##################################################
+sp2_1b_arm <- MakeSpecialBarplot(
+  df = arm_hit_hot,
+  arm_col = "Arm",
+  special_gain = "Arm1q",
+  special_loss = "Arm9p",
+  title = "Immune Hot SCNA events (Arm-Level) p.adj < 0.2",
+  ylim_use = arm_limit_y,
+  ylab_use = "Number of Arm SCNAs"
+)
+
+##################################################
+## cytoband-level hot
+##################################################
+sp2_1b_cyto <- MakeSpecialBarplot(
+  df = cyto_hit_hot,
+  arm_col = "ChrArm",
+  special_gain = "1q",
+  special_loss = "9p",
+  title = "Immune Hot SCNA events (Cytoband-Level) p.adj < 0.2",
+  ylim_use = cyto_limit_y,
+  ylab_use = "Number of Cytoband SCNAs"
+)
+
+##################################################
+## combine panels
+##################################################
+sp2_1a <- wrap_elements(sp2_1a_arm + sp2_1a_cyto)
+sp2_1b <- wrap_elements(sp2_1b_arm + sp2_1b_cyto)
+sp2_1  <- sp2_1a / sp2_1b
+
+##################################################
+## save pdf
+##################################################
+# pdf("/Users/ze/Desktop/Ze_figure_github/figure2/sf2.1.pdf", height = 12, width = 20)
+print(sp2_1)
+# dev.off()
+```
+

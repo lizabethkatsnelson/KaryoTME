@@ -1,0 +1,396 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# install karyotype to visualize cytobands 
+
+## 1q gain 
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+# BiocManager::install("karyoploteR")
+
+library(karyoploteR)
+
+library(GenomicRanges)
+
+
+# Get cytoband info for hg38
+cytobands <- getCytobands("hg38")
+
+# Filter for chr1 q arm only
+chr1q_bands <- subset(cytobands, seqnames(cytobands) == "chr1" & grepl("^q", cytobands$name))
+
+# Create karyoplot for chr1
+kp <- plotKaryotype(genome="hg38", chromosomes="chr1", plot.type=1)
+
+# Add custom labels for only q-arm bands
+kpText(
+  kp,
+  chr = as.character(seqnames(chr1q_bands)),
+  x = (start(chr1q_bands) + end(chr1q_bands)) / 2,
+  y = rep(0.5, length(chr1q_bands)),
+  labels = chr1q_bands$name,
+  srt = 90,
+  pos = 3,
+  cex = 0.6,
+  col = "black"
+)
+
+# Save as PDF
+pdf("chr1_karyotype_labels.pdf", width=10, height=3)
+plotKaryotype(genome="hg38", chromosomes="chr1")
+dev.off()
+```
+
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Load cytobands and filter chr1
+cytobands <- getCytobands("hg38")
+chr1_bands <- subset(cytobands, seqnames == "chr1")
+
+# Set your custom file path
+output_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/bulk seq/chr1_cytobands_labeled.pdf"
+
+# Save plot as PDF
+pdf(output_path, width = 10, height = 3)
+
+# Plot chr1
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr1")
+
+# Convert seqnames to a character vector of the correct length
+label_regions <- GRanges(
+  seqnames = rep("chr1", length(chr1_bands)),  # FIX HERE
+  ranges = IRanges(start = start(chr1_bands), end = end(chr1_bands))
+)
+
+# Add labels
+kpText(kp,
+       data = label_regions,
+       labels = chr1_bands$name,
+       y = 0.3,
+       srt = 90,
+       cex = 0.5,
+       pos = 3)
+
+dev.off()
+```
+
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Get cytobands (hg38)
+cytobands <- getCytobands("hg38")
+
+# Filter for chr1 q-arm only
+chr1q_bands <- subset(cytobands, seqnames == "chr1" & grepl("^q", name))
+
+# Define zoom range for q-arm
+chr1q_start <- min(start(chr1q_bands))
+chr1q_end <- max(end(chr1q_bands))
+
+# Plot zoomed-in chr1 q-arm only
+kp <- plotKaryotype(
+  genome = "hg38",
+  chromosomes = "chr1",
+  zoom = GRanges("chr1", IRanges(start = chr1q_start, end = chr1q_end))
+)
+
+# Add q-arm cytobands
+kpAddCytobands(kp, cytobands = chr1q_bands)
+
+# Add labels ABOVE the cytobands
+kpText(
+  kp,
+  chr = as.character(seqnames(chr1q_bands)),
+  x = (start(chr1q_bands) + end(chr1q_bands)) / 2,
+  y = rep(1.2, length(chr1q_bands)),  # place above ideogram
+  labels = chr1q_bands$name,
+  srt = 90,
+  pos = 1,
+  cex = 0.6,
+  col = "black"
+)
+```
+
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Load cytobands
+cytobands <- getCytobands()
+
+# Filter to chr1 q-arm only
+chr1q_bands <- subset(cytobands, seqnames == "chr1" & grepl("^q", name))
+
+# Get start and end coordinates of q-arm
+chr1q_start <- min(start(chr1q_bands))
+chr1q_end   <- max(end(chr1q_bands))
+
+# Create plot with only chr1 and zoom into q-arm range
+pdf("chr1q_karyotype.pdf", width=10, height=3)
+
+kp <- plotKaryotype(
+  chromosomes = "chr1",
+  zoom = GRanges("chr1", IRanges(start = chr1q_start, end = chr1q_end))
+)
+
+# Add cytobands only from q-arm
+kpAddCytobands(kp, cytobands = chr1q_bands)
+
+
+# Create karyoplot for chr1
+kp <- plotKaryotype(genome="hg38", chromosomes="chr1", plot.type=1)
+
+# Save as PDF
+dev.off()
+```
+
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Get cytoband data
+cytobands <- getCytobands("hg38")
+
+# Subset for chr1 q-arm only
+chr1q_bands <- subset(cytobands, seqnames == "chr1" & grepl("^q", name))
+
+# Get zoom range for q-arm
+chr1q_start <- min(start(chr1q_bands))
+chr1q_end <- max(end(chr1q_bands))
+
+# Create zoomed-in plot of chr1 q-arm
+kp <- plotKaryotype(
+  genome = "hg38",
+  chromosomes = "chr1",
+  zoom = GRanges("chr1", IRanges(start = chr1q_start, end = chr1q_end))
+)
+
+# Draw cytoband rectangles manually (instead of kpAddCytobands)
+kpPlotCytobands(kp, cytobands = chr1q_bands)
+
+# Add cytoband names *above* the ideogram
+kpText(
+  kp,
+  chr = as.character(seqnames(chr1q_bands)),
+  x = (start(chr1q_bands) + end(chr1q_bands)) / 2,
+  y = rep(1.5, length(chr1q_bands)),  # higher Y position
+  labels = chr1q_bands$name,
+  srt = 90,
+  pos = 1,
+  cex = 0.6,
+  col = "black"
+)
+```
+
+
+## 9p loss
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Load cytobands and filter chr1
+cytobands <- getCytobands("hg38")
+chr9_bands <- subset(cytobands, seqnames == "chr9")
+
+# Set your custom file path
+output_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/bulk seq/chr9_cytobands_labeled.pdf"
+
+# Save plot as PDF
+pdf(output_path, width = 10, height = 3)
+
+# Plot chr1
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr9")
+
+# Convert seqnames to a character vector of the correct length
+label_regions <- GRanges(
+  seqnames = rep("chr9", length(chr9_bands)),  # FIX HERE
+  ranges = IRanges(start = start(chr9_bands), end = end(chr9_bands))
+)
+
+# Add labels
+kpText(kp,
+       data = label_regions,
+       labels = chr9_bands$name,
+       y = 0.3,
+       srt = 90,
+       cex = 0.5,
+       pos = 3)
+
+dev.off()
+```
+
+
+```{r}
+getwd()
+```
+
+```{r}
+regression_results <- readRDS("Regression_Outputs_xcell0.3_cytobandcnv_continuous0.2.rds")
+class(regression_results)
+
+data_table<-readRDS("TCGA_working_tables.rds")
+class(data_table)
+```
+
+
+## 1p loss
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Load cytoband data
+cytobands <- getCytobands("hg38")
+
+# Subset chr1p
+chr1p_bands <- subset(cytobands, seqnames == "chr1" & grepl("^p", name))
+chr1p_start <- min(start(chr1p_bands))
+chr1p_end <- max(end(chr1p_bands))
+
+# Plot preview to RStudio
+kp1p <- plotKaryotype(
+  genome = "hg38",
+  chromosomes = "chr1",
+  zoom = GRanges("chr1", IRanges(start = chr1p_start, end = chr1p_end))
+)
+
+kpAddCytobands(kp1p, cytobands = chr1p_bands)
+
+kpText(
+  kp1p,
+  chr = as.character(seqnames(chr1p_bands)),
+  x = (start(chr1p_bands) + end(chr1p_bands)) / 2,
+  y = rep(1.5, length(chr1p_bands)),
+  labels = chr1p_bands$name,
+  srt = 90,
+  pos = 1,
+  cex = 0.6,
+  col = "black"
+)
+```
+
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Get cytoband info for hg38
+cytobands <- getCytobands("hg38")
+
+# Filter for chr1 p-arm only
+chr1p_bands <- subset(cytobands, seqnames(cytobands) == "chr1" & grepl("^p", cytobands$name))
+
+# Create karyoplot with plot.type=1 to allow label space
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr1", plot.type = 1)
+
+# Add cytoband labels for p-arm
+kpText(
+  kp,
+  chr = as.character(seqnames(chr1p_bands)),
+  x = (start(chr1p_bands) + end(chr1p_bands)) / 2,
+  y = rep(0.5, length(chr1p_bands)),  # lower side of ideogram
+  labels = chr1p_bands$name,
+  srt = 90,
+  pos = 3,
+  cex = 0.6,
+  col = "black"
+)
+```
+
+```{r}
+# save as pdf
+pdf("chr1p_karyotype_labels.pdf", width = 10, height = 3)
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr1", plot.type = 1)
+kpText(
+  kp,
+  chr = as.character(seqnames(chr1p_bands)),
+  x = (start(chr1p_bands) + end(chr1p_bands)) / 2,
+  y = rep(0.5, length(chr1p_bands)),
+  labels = chr1p_bands$name,
+  srt = 90,
+  pos = 3,
+  cex = 0.6,
+  col = "black"
+)
+dev.off()
+```
+
+## 6p gain 
+```{r}
+library(karyoploteR)
+library(GenomicRanges)
+
+# Load cytoband data for hg38
+cytobands <- getCytobands("hg38")
+
+# Filter for chromosome 6 p-arm
+chr6p_bands <- subset(cytobands, seqnames == "chr6" & grepl("^p", cytobands$name))
+
+# Create karyoplot with padding space for labeling
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr6", plot.type = 1)
+
+# Add custom labels for only 6p cytobands
+kpText(
+  kp,
+  chr = as.character(seqnames(chr6p_bands)),
+  x = (start(chr6p_bands) + end(chr6p_bands)) / 2,
+  y = rep(0.5, length(chr6p_bands)),  # label below the ideogram
+  labels = chr6p_bands$name,
+  srt = 90,
+  pos = 3,
+  cex = 0.6,
+  col = "black"
+)
+```
+
+```{r}
+# save
+pdf("chr6p_karyotype_labels.pdf", width = 10, height = 3)
+kp <- plotKaryotype(genome = "hg38", chromosomes = "chr6", plot.type = 1)
+kpText(
+  kp,
+  chr = as.character(seqnames(chr6p_bands)),
+  x = (start(chr6p_bands) + end(chr6p_bands)) / 2,
+  y = rep(0.5, length(chr6p_bands)),
+  labels = chr6p_bands$name,
+  srt = 90,
+  pos = 3,
+  cex = 0.6,
+  col = "black"
+)
+dev.off()
+```
+
+# Working table
+```{r}
+# Combine all elements (data frames) in the list into a single data frame
+working_table <- bind_rows(data_table)
+
+# Check the result
+print(working_table)
+```
+
+# Regressgion results
+```{r}
+library(dplyr)
+
+combined <- bind_rows(regression_results, .id = "TumorType")
+
+# Export to CSV
+write.csv(combined, "regression_results_continous.csv", row.names = FALSE)
+```
+
+check what is inside 
+```{r}
+names(regression_results)
+```
+```{r}
+# show structure of list up to 2 levels deep
+str(regression_results, max.level = 2)
+```
+
+

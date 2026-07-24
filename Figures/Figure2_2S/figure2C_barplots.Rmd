@@ -1,0 +1,75 @@
+```{r}
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+
+# --------------------------------------------------
+# Tumor group mapping
+# --------------------------------------------------
+tumor_group_map <- c(
+  "Gyn"="UCEC.MSI", "Gyn"="UCEC.MSS", "Gyn"="OV", 
+  "Squamous"="CESC","Squamous"="LUSC", "Squamous"="HNSC.HPVneg", "Squamous"="ESCA.SC","Squamous"="BLCA", 
+  "Adeno" = "BRCA.pos","Adeno" = "BRCA.neg","Adeno" = "PRAD","Adeno" = "LUAD","Adeno" = "LIHC",
+  "GI"="COADREAD.MSI", "GI"="COADREAD.MSS", "GI"="ESCA.AD", "GI"="STAD", "GI"="PAAD",
+  "Kidney"="KICH", "Kidney"="KIRC", "Kidney"="KIRP",
+  "NC-Derived"="GBM", "NC-Derived"="LGG", "NC-Derived"="SKCM", "NC-Derived"="UVM",
+  "Other" = "ACC","Other" = "MESO","Other"="PCPG", "Other"="SARC", "Other"="TGCT", "Other"="UCS"
+)
+
+###########################################################################
+###########################################################################
+###                                                                     ###
+###                              FIGURE 2C                              ###
+###                                                                     ###
+###########################################################################
+###########################################################################
+library(dplyr)
+# ------- 2c.1 pan cacner level
+arm_hit = read.csv("input/linear_regression_Outputs_armlvl.csv",row.names = 1)
+arm_hit <- arm_hit %>%
+  group_by(TumorType) %>%
+  mutate(BH = p.adjust(P_val, method = "BH")) %>%
+  ungroup()
+
+arm_hit$hit_value = arm_hit$cnv_status * arm_hit$X.signedlog.P.adj.
+arm_hit$hit_group = ifelse( arm_hit$hit_value > 0, "hot","cold")
+arm_hit$EventType = ifelse(arm_hit$cnv_status > 0, "Gain","Loss")
+arm_hit$tumor_group = unlist(sapply( arm_hit$TumorType, function(x){ res = names(tumor_group_map )[tumor_group_map  == x]
+                                                                     if(length(res) == 0){res = "not in group"}
+                                                                     return(res)}))   
+arm_hit = arm_hit[arm_hit$tumor_group != "not in group",]
+
+
+arm_hit = arm_hit[arm_hit$BH < 0.2, ]
+
+arm_hit_all = arm_hit
+arm_hit_all$panel = "ALL"
+arm_hit_allexcept = arm_hit[arm_hit$tumor_group != "Kidney" ,]
+arm_hit_allexcept$panel = "ALL except Kidney"
+arm_hit_kidney = arm_hit[arm_hit$tumor_group == "Kidney" ,]
+arm_hit_kidney$panel = "Kidney Only"
+
+gg_df = rbind(arm_hit_all,arm_hit_allexcept,arm_hit_kidney)
+
+legend_pos = c(0.85,0.85)
+p2c = ggplot(gg_df,aes(x = hit_group,fill = EventType)) +
+         geom_bar(position=position_dodge())+ 
+         scale_fill_manual(values=c('#EA6A6A','#4F6DB8')) + 
+         theme_classic() + 
+         facet_wrap(.~panel) + 
+         xlab("") + 
+         ylab("Number of Arm SCNAs") +
+         theme(  
+                 axis.title.y = element_text(size = 20),
+                 axis.text.x = element_text(size = 18),
+                 strip.text = element_text(size = 20), 
+                 legend.position = legend_pos,
+                 legend.title = element_blank(),
+                 legend.text = element_text(size = 18))
+
+#pdf("/Users/ze/Desktop/Ze_figure_github/figure2/f2_c.pdf",height = 5,width = 10)
+print(p2c)
+#dev.off()
+```
+
