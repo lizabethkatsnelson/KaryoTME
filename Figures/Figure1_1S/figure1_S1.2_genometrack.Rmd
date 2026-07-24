@@ -1,0 +1,243 @@
+```{r}
+source("function_linearcv.R")
+library(dplyr)
+library(purrr)
+library(stringr)
+library(ggplot2)
+#source("plot_area_immunescore_cnv_regression.R")
+
+
+####loading###
+working_tables <- readRDS(file = "./input/TCGA_working_tables.rds")
+cnv_event_level = c("CytoCNV" ,"ArmCNV")[2]
+list_ct = gsub("_RNA","",names(working_tables)[grep("RNA",names(working_tables))])
+
+list_res = list()
+for(ct in list_ct){	
+res <- tryCatch({
+ cnv_df = working_tables[[paste0(ct, "_",cnv_event_level)]]
+ cov_df = cbind(AS = rowSums(abs(cnv_df))) # add Aneuploidy Score (AS)
+ is_df = working_tables[[paste0(ct, "_IS")]][,"Ranked_Sum",drop=F]
+ gene_locations <- read.csv("./input/Biomart_Gene_Locations.csv")
+
+ ## align
+ common_samples <- Reduce(intersect, list(rownames(cov_df),rownames(is_df)))
+ is_df2  <- is_df[common_samples, , drop = FALSE]
+ cnv_df2 <- cnv_df[common_samples, , drop = FALSE]
+ cov_df2 = cov_df[common_samples,,drop = FALSE]
+ 
+ ## 
+ y = is_df2[[1]]
+
+ ##
+ cytobands <- setdiff(colnames(cnv_df2), "AS")
+ names(cytobands) = cytobands
+ cyto_levels <- cytobands
+ cyto_info <- parse_cytoband_info(cytobands)
+ 
+ cnv_cat_mtx <- apply(cnv_df2, 1, function(x) {
+  ifelse(x > 0.2, "Gain",
+         ifelse(x < -0.2, "Loss", "Neutral"))})
+ gain_proportion = apply(cnv_cat_mtx,1,function(x){ sum(x == "Gain")/length(x) })
+ loss_proportion = apply(cnv_cat_mtx,1,function(x){ sum(x == "Loss")/length(x) })
+ 
+
+
+
+
+ ##################################
+ ### cov: as ;50-50; 60% cv, full ## 
+ ##################################
+ y = is_df2[[1]]
+ res = linear_function(thread_cutoff = 0.5,
+                model = NULL,
+                covariates = cov_df2,
+                y = y,
+                cnv = cnv_df2   )
+ res$`-signedlog(P.adj)` = -sign(res$Coefficients) * log10( p.adjust( res$P_val, method = "BH" ) )
+ sign_cnv = sign(apply(cnv_df,2,mean))[res[[1]] ]
+ res$cnv_status =  sign_cnv
+
+ p1 = lr_plot_function(as.data.frame(res),
+		       cnv_df = cnv_df2,
+                       stat_col ="-signedlog(P.adj)",
+                       model = "full",
+		       signif = -log10(0.05),
+		       sec_signif = -log10(0.2),
+                       plottitle = paste0("full inear IS ~ Cytoband_CNV(con0.2) + AS "),
+                       savepath = paste0("./output/",ct,"_full_lr_5050_5_3_is_Cytobandcnv_continuous0.2_plot_BH.pdf") )
+ #pdf( paste0("./output/",ct,"_full_lr_5050_5_3_is_Cytobandcnv_continuous0.2_plot_BH.pdf"),width = 10,height = 5)
+ print(p1)
+ #dev.off()
+ 
+ res = res[,c(1,2,3,4,6,10,11)]
+ res$gain_proportion = gain_proportion[res$Cytoband]
+ res$loss_proportion = loss_proportion[res$Cytoband]
+ list_res[[ct]] = res
+  })
+ if (is.null(res)) next
+ print(paste0(ct," finished"))
+ }
+
+#saveRDS(list_res, paste0("./output/linear_regression_Outputs_", cnv_event_level,".rds"))
+
+
+#list_res = readRDS("./output/linear_regression_Outputs_CytoCNV.rds")
+for(ct in names(list_res)){	
+  list_res[[ct]]$TumorType = ct 
+}
+res_df = Reduce(rbind, list_res)
+#write.csv(res_df,"./linear_regression_Outputs_cytobandlvl.csv")
+
+
+#list_res = readRDS("./output/linear_regression_Outputs_ArmCNV.rds")
+for(ct in names(list_res)){     
+  list_res[[ct]]$TumorType = ct 
+}
+res_df = Reduce(rbind, list_res)
+colnames(res_df)[1] = "Arm"
+#write.csv(res_df,"./linear_regression_Outputs_armlvl.csv")
+
+
+```
+
+```{r}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(rstatix)
+library(ggpubr)
+# ── Load data ──────────────────────────────────────────────────────────────
+data_table <- readRDS(file = "./input/TCGA_working_tables.rds")
+# ── make_violin: core plotting function ──────────────────────────────────────
+make_violin <- function(df, y_var, title_txt, comparisons = NULL) {
+  res <- make_res(as.formula(paste(y_var, "~ cnv_cate")), df, comparisons)
+  ggplot(df, aes(x = cnv_cate, y = .data[[y_var]], fill = cnv_cate)) +
+    geom_violin(trim = TRUE, alpha = 0.7) +
+    geom_boxplot(width = 0.20, fill = "white",
+                 outlier.shape = NA, coef = 0) +
+    geom_jitter(width = 0.08, size = 1, alpha = 0.3) +
+    scale_fill_manual(values = c("loss" = "#4F6DB8",
+                                 "neu"  = "#B8B8B8",
+                                 "gain" = "#EA6A6A")) +
+     geom_signif(
+      comparisons = comparisons,
+      test = "wilcox.test",
+      map_signif_level = TRUE,
+      step_increase = 0.1,
+      textsize = 5
+    )+
+    labs(x = NULL, y = "Immune Score", title = title_txt) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      axis.line = element_line(color = "black"),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    )
+}
+make_violin <- function(df, y_var, title_txt, comparisons = NULL) {
+  ggplot(df, aes(x = cnv_cate, y = .data[[y_var]], fill = cnv_cate)) +
+    geom_violin(trim = TRUE, alpha = 0.7) +
+    geom_boxplot(width = 0.20, fill = "white",
+                 outlier.shape = NA, coef = 0) +
+    geom_jitter(width = 0.08, size = 1, alpha = 0.3) +
+    scale_fill_manual(values = c("loss" = "#4F6DB8",
+                                 "neu"  = "#B8B8B8",
+                                 "gain" = "#EA6A6A")) +
+    geom_signif(
+      comparisons = comparisons,
+      test = "wilcox.test",
+     # map_signif_level = TRUE,
+      step_increase = 0.1,
+      textsize = 5
+    ) +
+    labs(x = NULL, y = "Immune Score", title = title_txt) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      axis.line = element_line(color = "black"),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    )
+}
+# ── plot_arm_IS: prepare data and call make_violin ────────────────────────────
+plot_arm_IS <- function(is_df, armcnv_df, arm, label_prefix, groups, comparisons) {
+  if (!(arm %in% colnames(armcnv_df))) {
+    message(paste("Skipping", arm, "- not found in", label_prefix))
+    return(invisible(NULL))
+  }
+  common    <- intersect(rownames(is_df), rownames(armcnv_df))
+  is_df     <- is_df[common, , drop = FALSE]
+  armcnv_df <- armcnv_df[common, , drop = FALSE]
+  cnv_status <- case_when(
+    armcnv_df[[arm]] >  0.2 ~ "gain",
+    armcnv_df[[arm]] < -0.2 ~ "loss",
+    TRUE                    ~ "neu"
+  )
+  plot_df <- data.frame(
+    Ranked_Sum = is_df$Ranked_Sum,
+    cnv_cate   = factor(cnv_status, levels = c("loss", "neu", "gain"))
+  )
+  plot_df <- plot_df[plot_df$cnv_cate %in% groups, ]
+  plot_df$cnv_cate <- droplevels(plot_df$cnv_cate)
+  make_violin(
+    df          = plot_df,
+    y_var       = "Ranked_Sum",
+    title_txt   = paste(label_prefix, gsub("Arm", "", arm)),
+    comparisons = comparisons
+  )
+}
+# ── arm config: each arm independently specifies which groups to display and comparison pairs ──
+arm_config <- list(
+  PAAD = list(
+    Arm1q = list(groups      = c("neu", "gain"),
+                 comparisons = list(c("neu", "gain"))),
+    Arm6q = list(groups      = c("loss", "neu"),
+                 comparisons = list(c("loss", "neu"))),
+    Arm9p = list(groups      = c("loss", "neu", "gain"),
+                 comparisons = list(c("loss", "neu"), c("neu", "gain")))
+  ),
+  SKCM = list(
+    Arm6q = list(groups      = c("loss", "neu", "gain"),
+                 comparisons = list(c("loss", "neu"), c("neu", "gain"))),
+ #   Arm9p = list(groups      = c("loss", "neu", "gain"),
+ #                 comparisons = list(c("loss", "neu"), c("neu", "gain")))
+     Arm1q = list(groups      = c( "neu", "gain"),
+                  comparisons = list(c("neu", "gain")))
+  ),
+  HNSC_HPVneg = list(
+    Arm5q  = list(groups      = c("loss", "neu", "gain"),
+                  comparisons = list(c("loss", "neu"), c("neu", "gain"))),
+    Arm9p  = list(groups      = c("loss", "neu", "gain"),
+                  comparisons = list(c("loss", "neu"), c("neu", "gain"))),
+    Arm18p = list(groups      = c("loss", "neu", "gain"),
+                  comparisons = list(c("loss", "neu"), c("neu", "gain")))
+  )
+)
+# ── Main loop: generate and save all plots ────────────────────────────────────
+for (cancer in names(arm_config)) {
+  # get data by cancer type (HNSC HPV-neg is already a separate table, no filtering needed)
+  if (cancer == "HNSC_HPVneg") {
+    is_df     <- data_table$HNSC.HPVneg_IS
+    armcnv_df <- data_table$HNSC.HPVneg_ArmCNV
+  } else {
+    is_df     <- data_table[[paste0(cancer, "_IS")]]
+    armcnv_df <- data_table[[paste0(cancer, "_ArmCNV")]]
+  }
+  for (arm in names(arm_config[[cancer]])) {
+    cfg <- arm_config[[cancer]][[arm]]
+    p   <- plot_arm_IS(is_df, armcnv_df, arm, cancer,
+                       cfg$groups, cfg$comparisons)
+    print(p)
+    }
+  }
+
+
+```
+

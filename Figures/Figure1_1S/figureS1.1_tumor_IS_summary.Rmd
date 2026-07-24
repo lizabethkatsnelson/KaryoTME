@@ -1,0 +1,691 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(readr)
+library(dplyr)
+
+# Folder path
+folder_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/TCGA_Deconvolutions_CNV_IS/Arm/Outputs"
+
+# Match continuous regression files
+files <- list.files(
+  path = folder_path,
+  pattern = "continuous0.2_regression.csv",  # looser match
+  full.names = TRUE
+)
+
+# Print what you found
+print(basename(files))
+
+# Load all matching files
+all_data <- lapply(files, function(file) {
+  tryCatch({
+    df <- read_csv(file)
+    df$TumorType <- sub("_is0.3.*", "", basename(file))  # Extract tumor type
+    return(df)
+  }, error = function(e) {
+    message("Failed to read: ", file)
+    return(NULL)
+  })
+}) %>% bind_rows()
+
+# Check result
+colnames(all_data)
+head(all_data)
+```
+# Filter for selected tumor types
+```{r}
+tumor_types_in_figure <- c(
+  "UCEC.MSI", "UCEC.MSS", "OV", "CESC", "LUSC", 
+  "HNSC.HPVneg", "ESCA.SC", "BLCA", "BRCA", "BRCA.neg", "BRCA.pos","PRAD",
+  "LUAD", "LIHC", "COADREAD.MSI", "COADREAD.MSS", "ESCA.AD",  "STAD", "PAAD", 
+  "KICH", "KIRC", "KIRP", "LGG", "GBM", "SKCM", "UVM", "ACC","MESO", "PCPG", "UCS", "SARC", "TGCT"
+)
+
+# Example: Filter your main dataset 'all_data' 
+# so that it only contains the tumor types from the figure.
+filtered_data <- all_data %>%
+  filter(TumorType %in% tumor_types_in_figure)
+```
+
+
+# Fig2
+## SKCM
+```{r}
+SKCM_targets <- data.frame(
+  Arm = c("1q", "4q", "6p", "6q", "9p"),
+  Event = c("Gain", "Loss", "Gain", "Loss", "Loss")
+)
+
+# Filter the data based on SKCM_targets
+SKCM <- all_data %>%
+  filter(TumorType == "SKCM") %>%
+  semi_join(SKCM_targets, by = c("Arm", "Event")) %>%
+  arrange(Arm, P_val)
+
+# Print results
+print(SKCM)
+```
+
+## LUAD
+```{r}
+library(dplyr)
+
+# Define arm-event pairs of interest
+luad_targets <- data.frame(
+  Arm = c("1q", "5q", "6q", "9p"),
+  Event = c("Gain", "Loss", "Loss", "Loss")
+)
+
+# Filter the data
+luad <- all_data %>%
+  filter(
+    TumorType == "LUAD" & (
+      (Arm == "1q" & Event == "Gain") |
+      (Arm == "5q" & Event == "Loss") |
+      (Arm == "6q" & Event == "Loss") |
+      (Arm == "9p" & Event == "Loss") |
+      (Arm == "15q" & Event == "Loss"))
+  ) %>%
+  arrange(Arm, P_val)
+
+# Print results
+print(luad)
+```
+
+```{r}
+# Load the RDS
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+
+# Extract LUAD arm CNV matrix
+luad_arm <- tcga[["LUAD_ArmCNV"]]
+
+# Add rownames as a column BEFORE reordering
+luad_arm$Sample_Barcode <- rownames(luad_arm)
+
+# Move Sample_Barcode to the first column
+luad_arm <- luad_arm[, c("Sample_Barcode", setdiff(names(luad_arm), "Sample_Barcode"))]
+
+# Save CSV with correct sample identifiers
+write.csv(luad_arm, "LUAD_ArmCNV.csv", row.names = FALSE)
+```
+
+## BLCA
+```{r}
+BLCA_targets <- data.frame(
+  Arm = c("9p", "11p", "17q"),
+  Event = c("Loss", "Loss", "Gain")
+)
+
+# Filter the data based on SKCM_targets
+BLCA <- all_data %>%
+  filter(TumorType == "BLCA") %>%
+  semi_join(BLCA_targets, by = c("Arm", "Event")) %>%
+  arrange(Arm, P_val)
+
+# Print results
+print(BLCA)
+```
+
+## PAAD
+```{r}
+PAAD_targets <- data.frame(
+  Arm = c("1q", "6q", "9p"),
+  Event = c("Gain", "Loss", "Loss")
+)
+
+# Filter the data based on SKCM_targets
+PAAD <- all_data %>%
+  filter(TumorType == "PAAD") %>%
+  semi_join(PAAD_targets, by = c("Arm", "Event")) %>%
+  arrange(Arm, P_val)
+
+# Print results
+print(PAAD)
+```
+
+## KIRC
+```{r}
+kirc_9p_gain_lowIS <- filtered_cytoband_data %>%
+  filter(
+    TumorType == "KIRC",
+    Chromosome == "Chr9",
+    Arm == "p",
+    Event == "Gain",
+    Z_val < 0,  # lower IS association
+    !is.na(Z_val)
+  ) %>%
+  arrange(P_val)  # optional: sort by significance
+
+print(kirc_9p_gain_lowIS)
+```
+
+# Get the desired arms
+- The Coefficients represent the effect size of CNV (e.g., arm loss) on cytotoxic immune score (IS).
+- A negative Coefficient = CNV reduces IS → lower cytotoxic immune score
+
+```{r}
+# Define arms of interest
+target_arms <- c("9p", "1p", "5q", "4q")
+
+# Filter for loss events on those arms
+results <- filtered_data %>%
+  filter(Arm %in% target_arms, Event == "Loss") %>%
+  select(TumorType, Arm, Event, Coefficients, Z_val, P_val)
+
+# Preview the results
+print(results)
+```
+
+
+```{r}
+# For each arm, get the top 20 rows (or however many you want) with p-value < 0.05,
+# ordered by p-value (i.e., the most significant ones first)
+top20_significant <- filtered_data %>%
+  filter(Arm %in% target_arms, Event == "Loss", P_val < 0.2) %>%
+  group_by(Arm) %>%
+  arrange(P_val, .by_group = TRUE) %>%
+  slice_head(n = 10) %>%
+  select(Arm, TumorType, Coefficients, Z_val, P_val)
+
+# Check final result
+print(top20_significant)
+
+# Save to CSV
+# write.csv(top20_significant, "Top20_Significant_by_Pval.csv", row.names = FALSE)
+```
+
+```{r}
+ # Filter the data for 5q loss and the selected tumor types, then order by p-value
+filtered_5q_loss <- filtered_data %>%
+  filter(Arm == "5q", Event == "Loss") %>%
+  arrange(P_val)
+
+# Print the result
+print(filtered_5q_loss)
+```
+
+```{r}
+ # Filter the data for 4q loss and the selected tumor types, then order by p-value
+filtered_4q_loss <- filtered_data %>%
+  filter(Arm == "4q", Event == "Loss") %>%
+  arrange(P_val)
+
+# Print the result
+print(filtered_4q_loss)
+```
+
+```{r}
+ # Filter the data for 4p loss and the selected tumor types, then order by p-value
+filtered_1p_loss <- filtered_data %>%
+  filter(Arm == "1p", Event == "Loss") %>%
+  arrange(P_val)
+
+# Print the result
+print(filtered_1p_loss)
+```
+
+```{r}
+top10_lowIS <- all_data %>%
+  filter(
+    Arm %in% target_arms,
+    Event == "Loss",
+    P_val < 0.05
+  ) %>%
+  group_by(Arm) %>%
+  arrange(Coefficients, .by_group = TRUE) %>%  # sort by IS suppression
+  slice_head(n = 10) %>%
+  ungroup() %>%
+  select(Arm, TumorType, Coefficients, Z_val, P_val)
+
+# Print full result (not truncated)
+print(top10_lowIS, n = Inf)
+
+
+```
+
+```{r}
+# Define target arms for gains
+target_gain_arms <- c("1q", "6p", "8p", "17q")
+
+# Filter for arm-level GAIN events with significant positive effect on IS
+top_gain <- filtered_data %>%
+  filter(
+    Arm %in% target_gain_arms,
+    Event == "Gain",
+    P_val<0.2
+  ) %>%
+  group_by(Arm) %>%
+  arrange(P_val, .by_group = TRUE) %>%   
+  select(Arm, TumorType, Coefficients, Z_val, P_val)
+
+# Print all results
+print(top_gain, n = Inf)
+```
+
+```{r}
+ # Filter the data for 4p loss and the selected tumor types, then order by p-value
+filtered_8p_gain <- filtered_data %>%
+  filter(Arm == "8p", Event == "Gain") %>%
+  arrange(P_val)
+
+# Print the result
+print(filtered_8p_gain)
+```
+
+# Cytotoxic scores 
+```{r}
+library(readr)
+library(dplyr)
+
+# Folder path
+folder_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/bulk seq/scores"
+
+# Match continuous regression files
+files <- list.files(
+  path = folder_path,
+  pattern = "regression_results_continous.csv",  # looser match
+  full.names = TRUE
+)
+
+# Print what you found
+print(basename(files))
+
+# Load all matching files
+all_data <- lapply(files, function(file) {
+  tryCatch({
+    df <- read_csv(file)
+    df$TumorType <- sub("_is0.3.*", "", basename(file))  # Extract tumor type
+    return(df)
+  }, error = function(e) {
+    message("Failed to read: ", file)
+    return(NULL)
+  })
+}) %>% bind_rows()
+
+# Combine CD8_T_cells and NK_cells to form a cytotoxic immune score
+selected_columns <- grep("^(TumorType|CD8_T_cells\\.|NK_cells\\.)", colnames(all_data), value = TRUE)
+cytotoxic_data <- all_data[, selected_columns]
+
+# Check result
+colnames(cytotoxic_data)
+head(cytotoxic_data)
+```
+
+```{r}
+# Define arms of interest
+target_arms <- c("9p", "1p", "5q", "4q")
+
+# Filter for loss events on those arms
+# For each arm, get top 7 lowest Coefficient (i.e., lowest IS)
+top10_lowIS <- cytotoxic_data %>%
+  filter(Arm %in% target_arms, Event == "Loss") %>%
+  group_by(Arm) %>%
+  arrange(Cytotoxic_Coefficients) %>%
+  slice_head(n = 20) %>%
+  select(Arm, TumorType, Cytotoxic_Coefficients, Cytotoxic_Z_val, Cytotoxic_P_val)
+
+print(top10_lowIS)
+```
+
+
+
+
+# Cytobands
+```{r}
+library(readr)
+library(dplyr)
+
+# === Cytoband-level regression folder ===
+folder_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/TCGA_Deconvolutions_CNV_IS/Cytoband/Outputs"
+
+# Match continuous regression files (same pattern)
+files <- list.files(
+  path = folder_path,
+  pattern = "continuous0.2_regression.csv",  # adjust pattern if needed
+  full.names = TRUE
+)
+
+# Print what was found
+print(basename(files))
+
+# Load all cytoband regression files
+all_cytoband_data <- lapply(files, function(file) {
+  tryCatch({
+    df <- read_csv(file)
+    df$TumorType <- sub("_is0.3.*", "", basename(file))  # Extract tumor type
+    return(df)
+  }, error = function(e) {
+    message("Failed to read: ", file)
+    return(NULL)
+  })
+}) %>% bind_rows()
+
+# View column names and preview data
+colnames(all_cytoband_data)
+head(all_cytoband_data)
+```
+
+```{r}
+
+# Filter to only specific tumor types 
+tumor_types_in_figure <- c(
+  "UCEC.MSI", "UCEC.MSS", "OV", "CESC", "LUSC", 
+  "HNSC.HPVneg", "ESCA.SC", "BLCA", "BRCA", "BRCA.neg", "BRCA.pos","PRAD",
+  "LUAD", "LIHC", "COADREAD.MSI", "COADREAD.MSS", "ESCA.AD",  "STAD", "PAAD", 
+  "KICH", "KIRC", "KIRP", "LGG", "GBM", "SKCM", "UVM", "ACC","MESO", "PCPG", "UCS", "SARC", "TGCT"
+)
+
+# Example: Filter your main dataset 'all_data' 
+# so that it only contains the tumor types from the figure.
+filtered_cytoband_data <- all_cytoband_data %>%
+  filter(TumorType %in% tumor_types_in_figure)
+
+# Check result
+colnames(all_cytoband_data)
+colnames(filtered_cytoband_data)
+head(filtered_cytoband_data)
+#write.csv(filtered_cytoband_data, "Selected_Cytoband_Events.csv", row.names = FALSE)
+```
+
+```{r}
+# Print all cytobands starting with 6p or 8p and are Gain events
+gain_6p_8p <- filtered_cytoband_data %>%
+  filter(
+    Event == "Gain",
+    P_val < 0.05,
+    grepl("^6p", Cytoband) | grepl("^8p", Cytoband)
+  ) %>%
+  arrange(Cytoband, TumorType)
+
+# View result
+print(gain_6p_8p, n = Inf)
+```
+
+```{r}
+# Print all cytobands starting with 6p or 8p and are Gain events
+loss_cytoband <- filtered_cytoband_data %>%
+  filter(
+    Event == "Loss",
+    P_val < 0.05,
+    grepl("^18q", Cytoband)  
+  ) %>%
+  arrange(Cytoband, TumorType)
+
+# View result
+print(loss_cytoband, n = Inf)
+```
+
+## Print out the table containing all cytobands and their tumor types 
+```{r}
+library(dplyr)
+library(tidyr)
+
+wide_table <- filtered_cytoband_data %>%
+  # Keep only the relevant columns
+  select(Cytoband, TumorType, Z_val, P_val) %>%
+  # Pivot to wide format so each Cytoband becomes a row and each TumorType provides its Z and P values
+  pivot_wider(
+    id_cols = Cytoband,
+    names_from = TumorType,
+    values_from = c(Z_val, P_val),
+    names_glue = "{TumorType}-{.value}",
+    # In case there are any duplicates, use the first value
+    values_fn = list(Z_val = ~ .[1], P_val = ~ .[1])
+  ) %>%
+  # Rename 
+  rename_with(~ gsub("Z_val", "Z", .x)) %>%
+  rename_with(~ gsub("P_val", "p", .x))
+
+# Print the final wide-format table
+print(wide_table)
+write.csv(wide_table, "Significant_Cytobands.csv", row.names = FALSE)
+```
+
+
+
+
+## Group all cytobands together 
+```{r}
+# Step 1: Create a grouping column for cytobands (e.g., "9p21" from "9p21.1", "9p21.2", etc.)
+aggregated_data <- filtered_cytoband_data %>%
+  mutate(Cytoband_group = sub("\\..*$", "", Cytoband)) %>%
+  # Step 2: For each TumorType and Cytoband_group, summarize by taking the minimum p-value 
+  # and the corresponding Z value (you can adjust the summarization as needed)
+  group_by(TumorType, Cytoband_group) %>%
+  summarise(
+    min_P_val = min(P_val, na.rm = TRUE),
+    # Get the Z_val corresponding to the minimum p-value:
+    corresponding_Z = Z_val[which.min(P_val)],
+    count = n(),  # optional: count how many sub-cytobands were aggregated
+    .groups = "drop"
+  )
+
+# Step 3: For each tumor type, select the cytoband group with the lowest p-value
+most_significant <- aggregated_data %>%
+  group_by(TumorType) %>%
+  slice_min(min_P_val, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(TumorType, min_P_val)
+
+# Print the result
+print(most_significant)
+```
+
+## 9p loss
+```{r}
+filtered9p_data <- filtered_cytoband_data %>%
+  # Filter to only chromosome 9p loss events
+  filter(Chromosome == "Chr9", Arm == "p", Event == "Loss") %>%
+  # Create a new column that removes the decimal part from Cytoband (e.g. "9p21.1" -> "9p21")
+  mutate(Cytoband_group = sub("\\..*$", "", Cytoband)) %>%
+  # Group by TumorType and the simplified Cytoband
+  group_by(TumorType, Cytoband_group) %>%
+  summarise(
+    mean_P_val = mean(P_val, na.rm = TRUE),
+    mean_Z     = mean(Z_val, na.rm = TRUE),
+    count      = n(),  # count how many sub-cytobands contributed
+    .groups = "drop"
+  ) %>%
+  # Filter for rows with mean_P_val less than 0.1
+  filter(mean_P_val < 0.05) %>%
+  # Arrange first by Cytoband_group, then by mean_P_val (lowest p-value = most significant)
+  arrange(Cytoband_group, mean_P_val)
+
+print(filtered9p_data)
+
+```
+
+```{r}
+# print out significant cytobands
+# Define the critical cytobands
+library(stringr)
+
+critical_cytobands <- c("9p21", "9p13", "9p24")
+
+critical_data <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr9",
+    Arm == "p",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(P_val)  # Order by p-value
+
+print(critical_data)
+```
+
+p values combined fisher test
+```{r}
+library(dplyr)
+
+data_HNSC <- filtered_cytoband_data %>%
+  filter(Chromosome == "Chr9", Arm == "p", Event == "Gain", TumorType == "HNSC.HPVneg") %>%
+  arrange(Cytoband)
+
+print(data_HNSC)
+```
+
+```{r}
+library(dplyr)
+
+data_BLCA <- filtered_cytoband_data %>%
+  filter(Chromosome == "Chr9", Arm == "p", Event == "Gain", TumorType == "BLCA") %>%
+  arrange(Cytoband)
+
+print(data_BLCA)
+```
+
+## 1q gain 
+```{r}
+oneqgain <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr1",
+    Arm == "q",
+    Event == "Gain",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(oneqgain)
+```
+
+
+## 1p loss 
+```{r}
+oneploss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr1",
+    Arm == "p",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(oneploss)
+```
+
+## 4q loss
+```{r}
+fourqloss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr4",
+    Arm == "q",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(fourqloss)
+```
+
+## 5q loss
+```{r}
+fiveqloss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr5",
+    Arm == "q",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(fiveqloss)
+```
+
+## 18q loss
+```{r}
+q18loss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr18",
+    Arm == "q",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(q18loss)
+```
+
+## 17q gain
+```{r}
+q17gain <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr17",
+    Arm == "q",
+    Event == "Gain",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(q17gain)
+```
+
+## 4q loss
+```{r}
+q4loss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr4",
+    Arm == "q",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(Cytoband, TumorType)  # Order by p-value
+
+print(q4loss)
+```
+
+## 9p loss
+```{r}
+p9loss <- filtered_cytoband_data %>%
+  filter(
+    Chromosome == "Chr9",
+    Arm == "p",
+    Event == "Loss",
+    P_val < 0.05,  # Only include rows with P_val < 0.1
+    # Check if Cytoband starts with one of the critical values
+    #str_detect(Cytoband, paste0("^(", paste(critical_cytobands, collapse = "|"), ")"))
+  ) %>%
+  arrange(P_val)  # Order by p-value
+
+print(p9loss)
+```
+
+
+# Immune hot
+```{r}
+# Define acrocentric chromosome arms
+acrocentric_arms <- c("13q", "14q", "15q", "21q", "22q")
+
+# Filter for LOSS events on acrocentric arms that are IMMUNE HOT (Z > 0, p < 0.05)
+immune_hot_losses <- filtered_data %>%
+  filter(
+    Arm %in% acrocentric_arms,
+    Event == "Loss",
+    Z_val > 0
+  ) %>%
+  arrange(Arm, TumorType, P_val)
+
+# Print result
+print(immune_hot_losses, n = Inf)
+```
+
