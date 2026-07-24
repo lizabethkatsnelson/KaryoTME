@@ -1,0 +1,555 @@
+```{r}
+
+mouse_genome_vis_fn = function(gg_df,bandsize = bandsize,  ylab_fontsize = 10){
+
+  chr_annotation = gg_df %>%
+  group_by(chr) %>%
+  summarise(start = min(rank), end = max(rank)) %>%
+  mutate(ymin = min(gg_df$r) - 0.1, ymax = min(gg_df$r) - 0.05)  # 调整y轴位置
+  
+  arm_boundaries = data.frame( boundary =  cumsum(table(gg_df$chr) ) )
+  arm_boundaries$chr = rownames(arm_boundaries )
+
+  chr_annotation$chr = gsub("chr","",chr_annotation$chr)
+  
+  p1 = ggplot(gg_df, aes(x = rank, y = r)) + 
+  # geom_area(fill = "pink") + 
+     geom_segment(aes(x = rank, xend = rank, y = 0, yend = r,  color = p),size = 0.01)+  scale_color_gradient(low = "white", high = "pink") + 
+   #  geom_tile(data = chr_annotation, aes(x = (start + end) / 2, 
+   #                                    y = ymin, width = end - start, 
+   #                                    height = ymax - ymin, fill = chr), 
+   #          inherit.aes = FALSE) + 
+    geom_text(data = chr_annotation, aes(x = (start + end) / 2, y = ymin - 0.02, label = chr), 
+            inherit.aes = FALSE, size = 3) + 
+    theme_minimal() + 
+    #scale_fill_manual(values =c("chr1" = "#E41A1C", "chr2" = "#377EB8", "chr3" = "#4DAF4A", "chr4" = "#984EA3",
+    #            "chr5" = "#FF7F00", "chr6" = "#FFFF33", "chr7" = "#A65628", "chr8" = "#F781BF",
+    #            "chr9" = "#999999", "chr10" = "#66C2A5", "chr11" = "#FC8D62", "chr12" = "#8DA0CB",
+    #            "chr13" = "#E78AC3", "chr14" = "#A6D854", "chr15" = "#FFD92F", "chr16" = "#E5C494",
+    #            "chr17" = "#B3B3B3", "chr18" = "#1B9E77", "chr19" = "#D95F02", "chrX" = "#7570B3")) + 
+    theme(legend.position = "none",
+       axis.title.y = element_text(size =  ylab_fontsize),
+       panel.grid.major = element_blank(),  
+       panel.grid.minor = element_blank())  + 
+    geom_vline( data = arm_boundaries ,aes(xintercept = boundary ), linetype = "longdash", size = chr_line_size )+
+    labs(x = "", y = "mouse", title = "R value with Arm Annotation")
+ # print(p1)
+   return(p1)
+}
+
+  
+mouseliftover_genome_vis_fn = function(gg_df,bandsize = bandsize , ylab_fontsize = 10){
+  
+  chr_annotation = gg_df %>%
+  group_by(chr) %>%
+  summarise(start = min(rank), end = max(rank)) %>%
+  mutate(ymin = min(gg_df$r) - 0.1, ymax = min(gg_df$r) - 0.05)  # 调整y轴位置
+  
+
+  boundaries = data.frame( boundary =  cumsum(table(gg_df$arm) ) )
+  boundaries$arm = rownames(boundaries )
+  arm_boundaries = boundaries[grep("p",rownames(boundaries)),]
+  chr_boundaries = boundaries[grep("q",rownames(boundaries)), ]
+  
+  chr_annotation$chr = gsub("chr","",chr_annotation$chr)
+  
+  p2 = ggplot(gg_df, aes(x = rank, y = r,alpha = p)) + 
+   #  geom_area(fill = "purple") + 
+    geom_segment(aes(x = rank, xend = rank, y = 0, yend = r,  color = p),size = bandsize)+ scale_color_gradient(low = "white", high = "purple") + 
+   # geom_tile(data = chr_annotation, aes(x = (start + end) / 2, 
+   #                                      y = ymin, width = end - start, 
+   #                                    height = ymax - ymin, fill = chr), 
+   #          inherit.aes = FALSE) + 
+    geom_text(data = chr_annotation, aes(x = (start + end) / 2, y = ymin - 0.02, label = chr), 
+            inherit.aes = FALSE, size = 3) + 
+    theme_minimal() + 
+   # scale_fill_manual(values =c(
+   #            "chr1" = "#E41A1C", "chr2" = "#377EB8", "chr3" = "#4DAF4A", "chr4" = "#984EA3",
+   #              "chr5" = "#FF7F00", "chr6" = "#FFFF33", "chr7" = "#A65628", "chr8" = "#F781BF",
+   #             "chr9" = "#999999", "chr10" = "#66C2A5", "chr11" = "#FC8D62", "chr12" = "#8DA0CB",
+   #              "chr13" = "#E78AC3", "chr14" = "#A6D854", "chr15" = "#FFD92F", "chr16" = "#E5C494",
+   #             "chr17" = "#B3B3B3", "chr18" = "#1B9E77", "chr19" = "#D95F02", "chr20" = "#7570B3",
+   #              "chr21" = "#E31A1C", "chrX" = "#FDBF6F")) + 
+   theme(legend.position = "none",
+       axis.title.y = element_text(size =  ylab_fontsize),
+       panel.grid.major = element_blank(),  
+       panel.grid.minor = element_blank())  + 
+    geom_vline( data = arm_boundaries ,aes(xintercept = boundary ), linetype = "dotted", size = center_line_size,alpha = 1)+
+    geom_vline( data = chr_boundaries ,aes(xintercept = boundary ), linetype = "longdash", size = chr_line_size )+
+    labs(x = "", y = "mouse liftover to human", title = "R value with Arm Annotation")
+  
+   return(p2)
+}
+  
+
+
+human_genome_vis_fn = function(gg_df,bandsize = bandsize ,  ylab_fontsize = 10){
+  
+  chr_annotation = gg_df %>%
+  group_by(chr) %>%
+  summarise(start = min(rank), end = max(rank)) %>%
+  mutate(ymin = min(gg_df$r) - 0.1, ymax = min(gg_df$r) - 0.05)  # 调整y轴位置
+  
+  boundaries = data.frame( boundary =  cumsum(table(gg_df$arm) ) )
+  boundaries$arm = rownames(boundaries )
+  arm_boundaries = boundaries[grep("p",rownames(boundaries)),]
+  chr_boundaries = boundaries[grep("q",rownames(boundaries)), ]
+
+  chr_annotation$chr = gsub("chr","",chr_annotation$chr)
+  
+ p3 = ggplot(gg_df, aes(x=rank, r)) +
+   # geom_area(fill = "blue") +
+    geom_segment(aes(x = rank, xend = rank, y = 0, yend = r,  color = p),size = bandsize)+  scale_color_gradient(low = "white", high = "blue") + 
+  #  geom_tile(data = chr_annotation, aes(x = (start + end) / 2, 
+  #                                      y = ymin, width = end - start, 
+  #                                     height = ymax - ymin, fill = chr), 
+  #          inherit.aes = FALSE) + 
+    geom_text(data = chr_annotation, aes(x = (start + end) / 2, y = ymin - 0.02, label = chr), 
+            inherit.aes = FALSE, size = 3) + 
+   # scale_fill_manual(values =c(
+   #              "chr1" = "#E41A1C", "chr2" = "#377EB8", "chr3" = "#4DAF4A", "chr4" = "#984EA3",
+   #            "chr5" = "#FF7F00", "chr6" = "#FFFF33", "chr7" = "#A65628", "chr8" = "#F781BF",
+   #              "chr9" = "#999999", "chr10" = "#66C2A5", "chr11" = "#FC8D62", "chr12" = "#8DA0CB",
+   #              "chr13" = "#E78AC3", "chr14" = "#A6D854", "chr15" = "#FFD92F", "chr16" = "#E5C494",
+   #              "chr17" = "#B3B3B3", "chr18" = "#1B9E77", "chr19" = "#D95F02", "chr20" = "#7570B3",
+   #             "chr21" = "#E31A1C", "chrX" = "#FDBF6F")) + 
+    geom_vline( data = arm_boundaries ,aes(xintercept = boundary ), linetype = "dotted", size = center_line_size,alpha = 1)+
+    geom_vline( data = chr_boundaries ,aes(xintercept = boundary ), linetype = "longdash", size = chr_line_size )+
+    labs(x = "", y = "human", title = "R value with Arm Annotation") + 
+    theme_minimal() +
+    theme(
+       legend.position = "none",
+       axis.title.y = element_text(size =  ylab_fontsize),
+       panel.grid.major = element_blank(),  
+       panel.grid.minor = element_blank())   
+
+ return(p3)
+}
+
+
+similarity_genome_vis_fn = function(gg_df,bandsize = 0.01,  ylab_fontsize = 10){
+  
+  chr_annotation = gg_df %>%
+  group_by(chr) %>%
+  summarise(start = min(rank), end = max(rank)) %>%
+  mutate(ymin = min(gg_df$spot_product ) - 0.1, ymax = min(gg_df$spot_product ) - 0.05)  # 调整y轴位置
+  
+  boundaries = data.frame( boundary =  cumsum(table(gg_df$arm) ) )
+  boundaries$arm = rownames(boundaries )
+  arm_boundaries = boundaries[grep("p",rownames(boundaries)),]
+  chr_boundaries = boundaries[grep("q",rownames(boundaries)), ]
+  
+  chr_annotation$chr = gsub("chr","",chr_annotation$chr)
+  
+  p4 = ggplot(gg_df, aes(x=rank, spot_product )) +
+   # geom_segment(aes(x = rank, xend = rank, y = 0, yend = r, alpha = p * 0.2), color = "mediumpurple1",size = 0.01)+
+    geom_segment(aes(x = rank, xend = rank, y = 0, yend = spot_product,  color =  color),size = bandsize )+
+    scale_color_gradient(low = "grey85", high = "grey30") + 
+  #  geom_tile(data = chr_annotation, aes(x = (start + end) / 2, 
+  #                                      y = ymin, width = end - start, 
+  #                                     height = ymax - ymin, fill = chr), 
+  #          inherit.aes = FALSE) + 
+    geom_text(data = chr_annotation, aes(x = (start + end) / 2, y = ymin - 0.02, label = chr), 
+            inherit.aes = FALSE, size = 3) + 
+   # scale_fill_manual(values =c(
+   #              "chr1" = "#E41A1C", "chr2" = "#377EB8", "chr3" = "#4DAF4A", "chr4" = "#984EA3",
+   #            "chr5" = "#FF7F00", "chr6" = "#FFFF33", "chr7" = "#A65628", "chr8" = "#F781BF",
+   #              "chr9" = "#999999", "chr10" = "#66C2A5", "chr11" = "#FC8D62", "chr12" = "#8DA0CB",
+   #              "chr13" = "#E78AC3", "chr14" = "#A6D854", "chr15" = "#FFD92F", "chr16" = "#E5C494",
+   #              "chr17" = "#B3B3B3", "chr18" = "#1B9E77", "chr19" = "#D95F02", "chr20" = "#7570B3",
+   #             "chr21" = "#E31A1C", "chrX" = "#FDBF6F")) + 
+    geom_vline( data = arm_boundaries ,aes(xintercept = boundary ), linetype = "dotted", size = center_line_size,alpha = 1)+
+    geom_vline( data = chr_boundaries ,aes(xintercept = boundary ), linetype = "longdash", size = chr_line_size )+
+    labs(x = "genome", y = "r product", title = "r product with Arm Annotation") + 
+    theme_minimal() +
+    theme(
+       legend.position = "none",
+       axis.title.y = element_text(size =  ylab_fontsize),
+       panel.grid.major = element_blank(),  
+       panel.grid.minor = element_blank())   
+
+  return(p4)
+  
+}
+
+ 
+```
+
+
+
+```{r}
+############################################################################
+############################################################################
+###                                                                      ###
+###                        FACS data from upenn                          ###
+###                                                                      ###
+############################################################################
+###########################################################################
+
+
+##mouse loading
+#mouse_res = readRDS("/Users/ze/Desktop/lisa_cellratio/upenn/sc_mouse_res.rds")
+mouse_res = readRDS("./output/facs_mouse_res.rds")
+mouse_p = mouse_res$p
+mouse_r = mouse_res$r
+mouse_cnv = mouse_res$cnv
+mouse_gene_order = mouse_res$gene_order
+#mouse_cell_ratio = readRDS("/Users/ze/Desktop/lisa_cellratio/upenn/sc_cell_ratio.rds")
+mouse_cell_ratio = readRDS("./output/flow_data.rds")
+
+
+##mouse liftover
+com_gene = readRDS("./output/human_mouselift_comgene.rds")
+#mouse_liftover_res = readRDS("/Users/ze/Desktop/lisa_cellratio/upenn/sc_mouse_liftover_res.rds")
+mouse_liftover_res = readRDS("./output/facs_mouse_liftover_res.rds")
+mouse_liftover_p = mouse_liftover_res$p[com_gene,]
+mouse_liftover_r = mouse_liftover_res$r[com_gene,]
+mouse_liftover_cnv = mouse_liftover_res$cnv[com_gene,]
+mouse_liftover_gene_order = mouse_liftover_res$gene_order[com_gene,]
+
+##human
+human_res = readRDS("/Users/ze/Desktop/lisa_cellratio/tcga/human_res.rds")
+human_p = human_res$p[com_gene,]
+human_r = human_res$r[com_gene,]
+human_cnv = human_res$cnv[,com_gene]
+human_gene_order = human_res$gene_order[com_gene,]
+cell_ratio = readRDS("./input/cellratio.rds")
+
+
+### com_gene
+#com_gene = intersect(rownames(mouse_liftover_res$cnv),rownames(human_res$p))
+#test_df = human_res$gene_order[com_gene,]
+#aggregate(test_df$start,by = list(test_df$arm),function(x){ all(diff(x) >= 0) })
+#test_df = mouse_liftover_res$gene_order[com_gene,]
+#aggregate(test_df$start,by = list(test_df$arm),function(x){ all(diff(x) >= 0) })
+#saveRDS(com_gene, "/Users/ze/Desktop/lisa_cellratio/human_mouselift_comgene.rds")
+
+list_ct = list("marcophage" = c("mouse" = "% Macrophages (F4/80+) / CD45+",
+                                "mouse_liftover" ="% Macrophages (F4/80+) / CD45+",
+                                 "human" =  "Macrophages"),
+               "CD8+ T cells" = c("mouse" =  "% CD8+ / CD45+" ,
+                                "mouse_liftover" = "% CD8+ / CD45+" ,
+                                 "human" =  "CD8_T_cells" ),
+               "CD4+ T cells" = c("mouse" =  "% CD4 /  CD45+"  ,
+                                "mouse_liftover" = "% CD4 /  CD45+"  ,
+                                 "human" = "CD4_T_cells" ) ,
+               "Monocytes" = c("mouse" = "% Monocytes (moMDSC) / CD45+" ,
+                               "mouse_liftover" = "% Monocytes (moMDSC) / CD45+" ,
+                               "human" = "Monocytes" ),
+               "NK cells" = c("mouse" = "% NK / CD45+"   ,
+                               "mouse_liftover" = "% NK / CD45+"  ,
+                               "human" = "NK_cells"  ),
+               "CD8 + NK" = c("mouse" = "% CD8 + NK / CD45+",
+                              "mouse_liftover" = "% CD8 + NK / CD45+",
+                              "human" = "CD8_NK"),
+               "Neutrophils" = c("mouse" = "% Neutrophils(/gMDSC) / CD45+"    ,
+                               "mouse_liftover" = "% Neutrophils(/gMDSC) / CD45+"  ,
+                               "human" = "Neutrophils" )
+)
+
+
+list_ct = list("marcophage" = c("mouse" = "% Macrophages (F4/80+) / CD45+",
+                                "mouse_liftover" ="% Macrophages (F4/80+) / CD45+",
+                                 "human" =  "macrophage" ),
+               "CD8+ T cells" = c("mouse" =  "% CD8+ / CD45+" ,
+                                "mouse_liftover" = "% CD8+ / CD45+" ,
+                                 "human" =  "CD8.positive..alpha.beta.T.cell"  ),
+               "CD4+ T cells" = c("mouse" =  "% CD4 /  CD45+"  ,
+                                "mouse_liftover" = "% CD4 /  CD45+"  ,
+                                 "human" = "CD4.positive..alpha.beta.T.cell" ) ,
+               "Monocytes" = c("mouse" = "% Monocytes (moMDSC) / CD45+" ,
+                               "mouse_liftover" = "% Monocytes (moMDSC) / CD45+" ,
+                               "human" = "monocyte" ),
+               "NK cells" = c("mouse" = "% NK / CD45+"   ,
+                               "mouse_liftover" = "% NK / CD45+"  ,
+                               "human" = "natural.killer.cell"  ),
+               #"CD8 + NK" = c("mouse" = "% CD8 + NK / CD45+",
+               #                "mouse_liftover" = "% CD8 + NK / CD45+",
+              #              "human" = "CD8_NK"),
+               "Neutrophils" = c("mouse" = "% Neutrophils(/gMDSC) / CD45+"    ,
+                               "mouse_liftover" = "% Neutrophils(/gMDSC) / CD45+"  ,
+                               "human" = "neutrophil" )
+)
+
+
+
+
+```
+
+
+```{r}
+com_gene = readRDS("output/human_mouselift_comgene.rds")
+human_res = readRDS("output/human_res.rds")
+human_p = human_res$p[com_gene,]
+human_r = human_res$r[com_gene,]
+ct_name_map <- c(
+  "CD4.positive..alpha.beta.T.cell"    = "CD4+ T cells",
+  "CD8.positive..alpha.beta.T.cell"    = "CD8+ T cells",
+  "helper.T.cell"                      = "Helper T cells",
+  "natural.killer.cell"                = "NK cells",
+  "monocyte"                           = "Monocytes",
+  "neutrophil"                         = "Neutrophils",
+  "gamma.delta.T.cell"                 = "γδ T cells",
+  "Non.plasma.B.cell"                  = "Non-plasma B cells",
+  "B.cell"                             = "B cells",
+  "T.follicular.helper.cell"           = "Tfh cells",
+  "regulatory.T.cell"                  = "Treg cells",
+  "myeloid.cell"                       = "Myeloid cells",
+  "T.helper.1.cell"                    = "Th1 cells",
+  "CD8..T.cell.PD1.low"                = "PD1-low CD8+ T cells",
+  "T.cell"                             = "T cells",
+  "T.helper.2.cell"                    = "Th2 cells",
+  "CD8..T.cell.PD1.high"               = "PD1-high CD8+ T cells",
+  "plasma.cell"                        = "Plasma cells",
+  "T.helper.17.cell"                   = "Th17 cells",
+  "macrophage"                         = "Macrophages",
+  "inflammatory.macrophage"            = "Inflammatory macrophages",
+  "fibroblast"                         = "Fibroblasts",
+  "endothelial.cell"                   = "Endothelial cells",
+  "alternatively.activated.macrophage" = "Alternatively activated macrophages",
+  "malignant.cell"                     = "Malignant cells"
+)
+human_r = human_r[,names(ct_name_map)]
+colnames(human_r) = ct_name_map
+colnames(human_r) = paste0(colnames(human_r), " r value")
+
+
+human_p = human_p[,names(ct_name_map)]
+colnames(human_p) = ct_name_map
+colnames(human_p) = paste0(colnames(human_p), " p value")
+
+human = cbind(human_p,human_r)
+human = human[,sort(colnames(human))]
+```
+
+
+
+```{r}
+
+f6_dim = c(14,19)  #14,19 f6
+f6_dim = c(7,21) # 6 21 s6
+chr_line_size = 0.6
+center_line_size = 0.5
+
+for(ct in names(list_ct)){
+############################################################################
+############################################################################
+###                                                                      ###
+###                     MOUSE VALUE OVER GENOME AXIS                     ###
+###                                                                      ###
+############################################################################
+############################################################################
+####whole genome 
+  ct_mouse = list_ct[[ct]][["mouse"]]
+  gg_df = data.frame(r = mouse_r[,ct_mouse],
+                     p = 1 - mouse_p[,ct_mouse],
+                     rank = 1:nrow(mouse_r),
+                     chr = mouse_gene_order$chr)
+  
+ p1 = mouse_genome_vis_fn(gg_df,bandsize = 0.01)
+ p1 = p1 +  ggtitle(ct) + theme(plot.title = element_text(hjust = 0.5,size = 35))
+
+
+
+############################################################################
+############################################################################
+###                                                                      ###
+###                    mouse liftover value over genome axis             ###
+###                                                                      ###
+############################################################################
+############################################################################
+####whole genome
+  ct_mouseliftover = list_ct[[ct]][["mouse_liftover"]]
+  gg_df = data.frame(r = mouse_liftover_r[,ct_mouseliftover],
+                     p = 1 - mouse_liftover_p[,ct_mouseliftover],
+                     rank = 1:nrow(mouse_liftover_r),
+                     chr = mouse_liftover_gene_order$chr,
+                     arm = mouse_liftover_gene_order$arm)
+
+  p2 = mouseliftover_genome_vis_fn(gg_df,bandsize = 0.01)
+  
+###1q
+  gg_df_1q = gg_df[gg_df$arm == "1q",]
+  gg_df_1q$rank = 1:nrow(gg_df_1q)
+  p2_1q = mouseliftover_genome_vis_fn(gg_df_1q,bandsize = 0.4)
+
+##9p 
+  gg_df_9p = gg_df[gg_df$arm == "9p",]
+  gg_df_9p$rank = 1:nrow(gg_df_9p)
+  p2_9p = mouseliftover_genome_vis_fn(gg_df_9p,bandsize = 2)
+  
+############################################################################
+############################################################################
+###                                                                      ###
+###                   human r value over genome axis                     ###
+###                                                                      ###
+############################################################################
+############################################################################
+####whole
+  ct_human = list_ct[[ct]][["human"]]
+  gg_df = data.frame(r = human_r[,ct_human],
+                     p = 1 - human_p[,ct_human],
+                     rank = 1:nrow(human_r),
+                     chr = human_gene_order$chr,
+                     arm = human_gene_order$arm)
+  
+  p3 = human_genome_vis_fn(gg_df,bandsize = 0.01 )
+
+###1q
+  gg_df_1q = gg_df[gg_df$arm == "1q",]
+  gg_df_1q$rank = 1:nrow(gg_df_1q)
+  p3_1q = human_genome_vis_fn(gg_df_1q,bandsize = 0.4)
+
+###9p 
+  gg_df_9p = gg_df[gg_df$arm == "9p",]
+  gg_df_9p$rank = 1:nrow(gg_df_9p)
+  p3_9p = human_genome_vis_fn(gg_df_9p,bandsize = 2)
+
+
+############################################################################
+############################################################################
+###                                                                      ###
+###                       spot similarity                                ###
+###                                                                      ###
+############################################################################
+############################################################################
+######whole
+  gg_df = data.frame(spot_product =  mouse_liftover_r[,ct_mouseliftover]  * human_r[,ct_human],
+                     rank = 1:nrow(human_r),
+                     chr = human_gene_order$chr,
+                     arm = human_gene_order$arm)
+  gg_df$color = ifelse(gg_df$spot_product > 0,  1, 0.6)
+ 
+  p4 = similarity_genome_vis_fn(gg_df,bandsize =  0.01)
+
+###1q
+  gg_df_1q = gg_df[gg_df$arm == "1q",]
+  gg_df_1q$rank = 1:nrow(gg_df_1q)
+  p4_1q = similarity_genome_vis_fn(gg_df_1q,bandsize = 0.4)
+
+###9p 
+  gg_df_9p = gg_df[gg_df$arm == "9p",]
+  gg_df_9p$rank = 1:nrow(gg_df_9p)
+  p4_9p = similarity_genome_vis_fn(gg_df_9p,bandsize = 2)
+  
+p = p1 / p2 / p3 / p4
+print(p)
+
+ 
+p_1q = p2_1q / p3_1q / p4_1q
+#pdf(paste0(ct,"_1qovergeomone.pdf") ,height = 9.36, width = 5.347)
+print(p_1q)
+#dev.off()
+
+p_9p = p2_9p / p3_9p / p4_9p
+#pdf(paste0(ct,"_9povergeomone.pdf") ,height = 9.36, width = 5.347)
+print(p_9p)
+#dev.off() 
+
+#############similarity test
+annabel_permutation_test = function(x, y,n = 1000,similarity_method,low_rvalue_cut = 0){
+  
+  index = abs(x) > low_rvalue_cut | abs(y) > low_rvalue_cut
+  rm_gene_statment = paste0("genes with absolute r value below ", low_rvalue_cut," have been removed ",sum(!index))
+ # index = x_p < 0.05 | y_p < 0.05
+  #rm_gene_statment = paste0("genes with absolute p value below ", 0.05 ," have been removed ",sum(!index))
+  
+  print(rm_gene_statment)
+  x = x[index]
+  y = y[index]  
+  
+  if(similarity_method == "Manhattan"){statisc_fn = function(x,y){sum(abs(x - y))} }
+  
+  if(similarity_method == "Euclidean"){statisc_fn = function(x,y){sqrt(sum((x - y)^2))} }
+  
+  if(similarity_method == "cosine"){statisc_fn = function(x,y){ sum(x * y) / (sqrt(sum(x^2)) * sqrt(sum(y^2))) } }
+  
+  if(similarity_method == "pearson"){statisc_fn = function(x,y){ cor(x,y) } }
+  
+  statisc = statisc_fn(x,y)
+  
+  permutation_statisc = c()
+  for( i in 1:n){
+    permutation_statisc = c( permutation_statisc, statisc_fn(x,sample(y,length(y))))
+  }
+  
+  if( similarity_method == "Manhattan" | similarity_method == "Euclidean"){p = sum(statisc > permutation_statisc) / n}
+  
+  if( similarity_method == "cosine" | similarity_method == "pearson"){p = sum(statisc < permutation_statisc) / n}
+  
+  gg_df = data.frame( statisc = permutation_statisc)
+  p1 = ggplot(gg_df,aes(x = statisc)) + 
+    geom_density() +
+    geom_vline(xintercept = statisc, color = "red",linetype="dashed" ) +
+    theme_minimal() + 
+    annotate("text", label = paste0("p value: ", round(p ,2)), x =  0.8 * statisc, y = 15, size = 5) + 
+    ggtitle(paste0(similarity_method,"\n",rm_gene_statment))
+  #print(p1)
+  return( p1)
+  
+}
+
+
+for( method in c("Manhattan","Euclidean","cosine","pearson")){
+  p5 = annabel_permutation_test(mouse_liftover_r[,ct_mouseliftover],human_r[,ct_human],similarity_method = method,low_rvalue_cut = 0.1)
+ # print(p1) 
+ pdf(paste0(ct,"_",method,"_liftoversimilarity.pdf"),height = 5,width = 6)
+ print(p5)
+ dev.off()
+}
+
+########box plot#####
+
+ mouse_liftover_gene_order_boxplot = mouse_liftover_gene_order
+ mouse_liftover_gene_order_boxplot$chr_cyto = paste0(mouse_liftover_gene_order_boxplot$chr, gsub("\\..*$","",mouse_liftover_gene_order_boxplot$cytoband))
+ 
+ human_gene_order_boxplot = human_gene_order
+ human_gene_order_boxplot$chr_cyto = paste0(human_gene_order_boxplot$chr, gsub("\\..*$","",human_gene_order_boxplot$cytoband))
+ 
+ #for(chr_arm in c("1p","1q","6p","9p")){
+ for(chr_arm in c("chr9p24","chr9p21" ,"chr9p13", "chr1q41" ,"chr1q21", "chr1q22",  "chr1q23",  "chr1q24", "chr1q25"  )){ 
+   
+  mean_mouse_liftover_cnv = aggregate(mouse_liftover_cnv ,by = list( mouse_liftover_gene_order_boxplot$chr_cyto),mean)
+  rownames(mean_mouse_liftover_cnv) = mean_mouse_liftover_cnv$Group.1
+  mean_mouse_liftover_cnv = mean_mouse_liftover_cnv[,-1]
+  mean_mouse_liftover_cnv = t(mean_mouse_liftover_cnv)
+  
+  mean_human_cnv = aggregate(t(human_cnv),by = list( human_gene_order_boxplot$chr_cyto),mean)
+  rownames(mean_human_cnv ) = mean_human_cnv $Group.1
+  mean_human_cnv  = mean_human_cnv [,-1]
+  mean_human_cnv  = t(mean_human_cnv )  
+  
+  gg_df1 = data.frame(cnv = mean_mouse_liftover_cnv[,chr_arm],
+                      cell_ratio = mouse_cell_ratio[,ct_mouseliftover],
+                      source = rep("mouse liftover",nrow(mean_mouse_liftover_cnv))
+                      )
+  gg_df2 = data.frame(cnv = mean_human_cnv[,chr_arm],
+                      cell_ratio = cell_ratio[,ct_human],
+                      source = rep("TCGA",nrow(mean_human_cnv))
+                      ) 
+  gg_df2 = gg_df2[gg_df2$cell_ratio < quantile(gg_df2$cell_ratio,0.9),]
+  
+  gg_df = rbind(gg_df1,gg_df2)
+
+  gg_df$cnv_cate = cut( gg_df$cnv,c(-Inf, -0.2,0.2,Inf),c("loss","neu","gain"))
+  
+  if(length(grep("1q",chr_arm )) != 0 ){gg_df = gg_df[gg_df$cnv_cate != "loss",]}
+  if(length(grep("9p",chr_arm )) != 0 ){gg_df = gg_df[gg_df$cnv_cate != "gain",]}
+
+  p6 = ggplot(gg_df,aes(x = cnv_cate,y = cell_ratio)) + 
+    geom_boxplot() + 
+    stat_compare_means(method = "t.test")+
+    facet_wrap(.~ source,scales = "free") +
+    theme_minimal() + 
+    ggtitle(paste0(" ",chr_arm, " event in ", ct))
+  
+  
+  pdf(paste0(ct,"_",chr_arm,"boxplot_armlvl.pdf"),height = 5,width = 7)
+  print(p6)
+  dev.off()
+  
+ }
+}
+
+```
+

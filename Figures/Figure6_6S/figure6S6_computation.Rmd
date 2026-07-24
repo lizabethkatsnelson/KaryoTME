@@ -1,0 +1,240 @@
+```{r}
+library(homologene)
+library(gtools)
+
+############################################################################
+############################################################################
+###                                                                      ###
+###                     UPENN CELL DNA - cell correlation                ###
+###                                                                      ###
+############################################################################
+############################################################################
+flow_data_full =read.csv("./input/JX_panc_flowdata.csv", check.names = FALSE)
+flow_data = flow_data_full[,3:ncol(flow_data_full )]
+ID_table = read.csv("./input/seqID_to_labID.csv")
+ID_table$Stanger.Lab.id = gsub("_Tcell.*$","",ID_table$Stanger.Lab.id )
+ID_table$Stanger.Lab.id = gsub("^.*_","",ID_table$Stanger.Lab.id )
+rownames(ID_table) = ID_table$Stanger.Lab.id
+ID_table = ID_table[unique(flow_data_full$`Tumor line`),]
+cnv = read.table("./input/KPCmut.PDAC.5k.short.seg.txt",header = T)
+cnv = cnv[cnv$ID %in% ID_table$seq.unit.id,]
+cnv$ID = unlist(sapply(cnv$ID,function(x){ ID_table$Stanger.Lab.id[ID_table$seq.unit.id == x] }))
+cnv$chrom = paste0("chr",cnv$chrom)
+cnv = cnv[cnv$loc.start < cnv$loc.end,]
+cnv$chrom =  gsub("chr20","chrX",cnv$chrom)
+
+
+cell_ratio = flow_data
+cell_ratio$`% CD8 + NK / CD45+` = cell_ratio$`% CD8+ / CD45+` + cell_ratio$`% NK / CD45+`
+saveRDS(cell_ratio,"./output/flow_data.rds")
+
+
+
+gene_order = readRDS("./input/mouse_gene_info.rds")
+gene_gr <- GRanges(seqnames = gene_order$chr,
+              ranges = IRanges(start = gene_order$start, end = gene_order$end),
+              gene_name = gene_order$gene)
+
+list_res = list()
+for(pid in unique(cnv$ID)){
+  cnv_sub = cnv[ cnv$ID == pid, ]
+  seg_gr = GRanges(seqnames = cnv_sub$chrom,
+              ranges = IRanges(start = cnv_sub$loc.start, end = cnv_sub$loc.end),
+              value = cnv_sub$seg.mean)
+  ###build grange object of gene
+  overlaps <- findOverlaps(seg_gr, gene_gr)
+  df1 <- data.frame(segment_chromosome = seqnames(seg_gr)[queryHits(overlaps)],
+                               segment_start = start(seg_gr)[queryHits(overlaps)],
+                               segment_end = end(seg_gr)[queryHits(overlaps)],
+                               seg_mean = seg_gr$value[queryHits(overlaps)])
+ # overlaps <- findOverlaps(gene_gr, seg_gr)
+  gene_seg_value <- data.frame(segment_chromosome = seqnames(gene_gr)[subjectHits(overlaps)],
+                               segment_start = start(gene_gr)[subjectHits(overlaps)],
+                               segment_end = end(gene_gr)[subjectHits(overlaps)],
+                               gene = gene_gr$gene_name[subjectHits(overlaps)])
+  gene_seg_value$seg_mean = df1$seg_mean
+  gene_seg_value = gene_seg_value[gene_seg_value$gene != "",]
+  gene_seg_value = gene_seg_value[!duplicated(gene_seg_value$gene),]
+  rownames(gene_seg_value) = gene_seg_value$gene
+  list_res[[pid]] = gene_seg_value
+}
+
+com_gene = Reduce(intersect,lapply(list_res,rownames))
+list_res = lapply(list_res, function(x){x[com_gene,]})
+seg_mean = Reduce(cbind, lapply(list_res,function(x){x[,"seg_mean"]}))
+colnames(seg_mean) = names(list_res)
+rownames(seg_mean) = com_gene
+
+#####correlation##########
+seg_mean = seg_mean[,flow_data_full$`Tumor line`]
+
+r_mtx = matrix(NA,nrow(seg_mean),ncol(cell_ratio)  )
+p_mtx = matrix(NA,nrow(seg_mean),ncol(cell_ratio)  )
+for( i in 1:nrow(seg_mean)){
+  for( j in 1:ncol(cell_ratio)){
+    res = cor.test( seg_mean[i,],cell_ratio[,j]  )
+    r_mtx[i,j] = res$estimate
+    p_mtx[i,j] = res$p.value
+  }
+}
+
+rownames(r_mtx) = rownames(seg_mean)
+colnames(r_mtx) = colnames(cell_ratio)
+rownames(p_mtx) = rownames(seg_mean)
+colnames(p_mtx) = colnames(cell_ratio)
+
+
+gene_order = readRDS("./input/mouse_gene_info.rds")
+com_gene = intersect(rownames(r_mtx),gene_order$gene)
+r_mtx = r_mtx[com_gene,]
+p_mtx = p_mtx[com_gene,]
+gene_order = gene_order[gene_order$gene %in% com_gene,]
+
+gene_order$chr = factor(gene_order$chr, levels = unique(gene_order$chr)[ mixedorder(unique(gene_order$chr)) ])
+gene_order <- gene_order %>% arrange(chr, start)
+
+r_mtx = r_mtx[gene_order$gene,]
+p_mtx = p_mtx[gene_order$gene,]
+seg_mean = seg_mean[gene_order$gene,]
+
+mouse_res = list( "r" = r_mtx,
+                  "p" = p_mtx,
+                  "cnv" = seg_mean,
+                  "gene_order" = gene_order)
+
+
+saveRDS(mouse_res,"./output/facs_mouse_res.rds")
+
+
+
+
+
+
+############################################################################
+############################################################################
+###                                                                      ###
+###                     UPENN mouse to human liftover                   ###
+###                                                                      ###
+############################################################################
+############################################################################
+human_gene_order = read.table("./input/gen_order.txt",sep = "\t")
+colnames(human_gene_order) = c("gene","chr","start","end")
+human_gene_order$gene = gsub("gene_name=","",human_gene_order$gene)
+human_gene_order = human_gene_order[!duplicated(human_gene_order$gene),]
+rownames(human_gene_order) = human_gene_order$gene
+
+#arm_info = read.table("/Users/ze/Documents/lab/Teresa/paolo/Genes.cytobands.txt",sep = "\t",header = T)
+#arm_info$arm <-gsub("^([0-9XY]+[pq]).*$", "\\1", arm_info$Cytoband)
+#rownames(arm_info) = arm_info$Gene.Symbol
+
+#com_gene = intersect(rownames(arm_info),rownames(human_gene_order))
+#arm_info = arm_info[com_gene,]
+#human_gene_order = human_gene_order[com_gene,]
+#human_gene_order$arm = arm_info$arm
+#human_gene_order$arm = factor(human_gene_order$arm, levels = unique(human_gene_order$arm)[ mixedorder(unique(human_gene_order$arm))] )
+
+
+rownames(human_gene_order) = human_gene_order$gene
+
+liftover_index <- homologene(rownames(r_mtx), inTax = 10090, outTax = 9606)
+r_mtx_liftover = r_mtx[liftover_index$`10090`,]
+rownames(r_mtx_liftover)  = liftover_index$`9606`
+p_mtx_liftover = p_mtx[liftover_index$`10090`,]
+rownames(p_mtx_liftover)  = liftover_index$`9606`
+seg_mean_liftover = seg_mean[liftover_index$`10090`,]
+rownames(seg_mean_liftover)  = liftover_index$`9606`
+
+com_gene = intersect(human_gene_order$gene, rownames(r_mtx_liftover))
+r_mtx_liftover = r_mtx_liftover[com_gene,]
+human_gene_order = human_gene_order[com_gene,]
+
+#human_gene_order$chr = factor(human_gene_order$chr, levels = unique(human_gene_order$chr)[mixedorder(unique(human_gene_order$chr)) ])
+
+#human_gene_order <- human_gene_order %>%
+#  mutate(chr_clean = gsub("^chr", "", chr)) %>%
+#  mutate(chr_clean = ifelse(chr_clean == "X", "23",
+#                     ifelse(chr_clean == "Y", "24",
+#                     ifelse(chr_clean == "M", "25", chr_clean)))) %>%
+#  mutate(chr_num = as.numeric(chr_clean)) %>%
+#  arrange(chr_num, start) %>%
+#  select(-chr_clean, -chr_num)
+
+r_mtx_liftover = r_mtx_liftover[human_gene_order$gene, ]
+p_mtx_liftover = p_mtx_liftover[human_gene_order$gene, ]
+seg_mean_liftover = seg_mean_liftover[human_gene_order$gene, ]
+
+
+
+
+mouse_liftover_res = list( "r" = r_mtx_liftover,
+                  "p" = p_mtx_liftover ,
+                  "cnv" = seg_mean_liftover,
+                  "gene_order" = human_gene_order)
+saveRDS(mouse_liftover_res ,"./ouput/facs_mouse_liftover_res.rds")
+
+
+
+```
+
+
+```{r}
+############################################################################
+############################################################################
+###                                                                      ###
+###                     TCGA DNA_cell CORRELATION                        ###
+###                                                                      ###
+############################################################################
+############################################################################
+
+tcga = readRDS("./input/TCGA_working_tables.rds")
+tcga_dna = tcga$PAAD_CNV
+
+
+cell_ratio = read.csv("./input/xcell2_PAAD_TMECompendium.csv",row.names = 1)
+
+com_sample = intersect(   rownames(cell_ratio),rownames(tcga_dna ) )
+tcga_dna = tcga_dna[com_sample,]
+cell_ratio = cell_ratio[com_sample,]
+#cell_ratio$CD8_NK = cell_ratio$CD8_T_cells + cell_ratio$NK_cells
+
+
+saveRDS(cell_ratio,"./input/cellratio.rds")
+
+r_mtx = matrix(NA,ncol(tcga_dna),ncol(cell_ratio)  )
+p_mtx = matrix(NA,ncol(tcga_dna),ncol(cell_ratio)  )
+for( i in 1:ncol(tcga_dna)){
+  for( j in 1:ncol(cell_ratio)){
+    res = cor.test( tcga_dna[,i],cell_ratio[,j]  )
+    r_mtx[i,j] = res$estimate
+    p_mtx[i,j] = res$p.value
+  }
+}
+
+rownames(r_mtx) = colnames(tcga_dna)
+colnames(r_mtx) = colnames(cell_ratio)
+rownames(p_mtx) = colnames(tcga_dna)
+colnames(p_mtx) = colnames(cell_ratio)
+
+gene_order = readRDS("./input/human_gene_info.rds")
+rownames(gene_order) = gene_order$gene
+com_gene = intersect(rownames(r_mtx),gene_order$gene)
+r_mtx = r_mtx[com_gene,]
+p_mtx = p_mtx[com_gene,]
+gene_order = gene_order[gene_order$gene %in% com_gene,]
+
+
+
+r_mtx = r_mtx[gene_order$gene,]
+p_mtx = p_mtx[gene_order$gene,]
+tcga_dna = tcga_dna[,gene_order$gene]
+
+
+human_res = list( "r" = r_mtx ,
+                  "p" =p_mtx  ,
+                  "cnv" = tcga_dna,
+                  "gene_order" = gene_order)
+saveRDS(human_res,"./ouput/human_res.rds")
+
+
+```
+
