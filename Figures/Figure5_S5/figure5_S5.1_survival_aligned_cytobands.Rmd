@@ -1,0 +1,1355 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+Align 
+
+```{r}
+library(tidyverse)
+library(survival)
+library(survminer)
+```
+
+```{r}
+# Load data 
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival") 
+
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt",  skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt", check.names = FALSE) %>%
+  rownames_to_column(var = "SAMPLE_ID")
+
+arm_cols      <- grep("^Arm",           names(cnv_raw), value = TRUE)
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+```
+
+```{r}
+# Compute AS. Use AS as a covariate 
+aneuploidy_cytoband <- cnv_raw %>%
+  select(SAMPLE_ID, all_of(cytoband_cols)) %>%
+  mutate(AneuploidyScore = rowSums(abs(across(all_of(cytoband_cols))), na.rm = TRUE)) %>%
+  select(SAMPLE_ID, AneuploidyScore)
+
+```
+
+```{r}
+#Build df
+sample_info_extended <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, TUMOR_PURITY) %>%
+  left_join(aneuploidy_cytoband, by = "SAMPLE_ID")
+
+# Categorize CNVs
+cnv_cat_cytoband <- cnv_raw %>%
+  mutate(across(all_of(cytoband_cols), ~ case_when(
+    .x >  0.2 ~ "Gain",
+    .x < -0.2 ~ "Loss",
+    TRUE       ~ "None"
+  )))
+
+merged_sample_cytoband <- merge(sample_info_extended, cnv_cat_cytoband, by = "SAMPLE_ID")
+
+df_cyto <- merge(
+  clin_pt[, c("PATIENT_ID", "OS_MONTHS", "OS_STATUS", "DRUG_TYPE")],
+  merged_sample_cytoband,
+  by = "PATIENT_ID"
+) %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+
+head(df_cyto)
+```
+
+```{r}
+# Cox regression loop
+cancer_types_to_plot <- c(
+  "Head and Neck Cancer", "Melanoma",
+  "Non-Small Cell Lung Cancer", "Renal Cell Carcinoma"
+)
+
+results_cytoband <- data.frame()
+
+for (tumor in cancer_types_to_plot) {
+  tumor_data <- df_cyto %>%
+    filter(CANCER_TYPE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c(comparison, "None"))) %>%
+        filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore,
+                       data = subset)
+          cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+          if (length(cnv_term) != 1) next
+
+          hr    <- exp(coef(fit)[cnv_term])
+          ci    <- round(exp(confint(fit)[cnv_term, ]), 3)
+          p     <- summary(fit)$coefficients[cnv_term, 5]
+
+          results_cytoband <- rbind(results_cytoband, data.frame(
+            CANCER_TYPE = tumor,
+            Cytoband    = band,
+            Comparison  = comparison,
+            HR          = round(hr, 3),
+            log2HR      = log2(hr),
+            sign_logP   = -log10(p) * sign(log2(hr)),
+            CI          = paste(ci[1], ci[2], sep = " - "),
+            P           = signif(p, 3),
+            N           = nrow(subset)
+          ))
+        }, error = function(e) {
+          message(paste("Skipped:", tumor, band, comparison, "-", e$message))
+        })
+      }
+    }
+  }
+}
+
+cat("Total results:", nrow(results_cytoband), "\n")
+```
+
+
+```{r}
+# Find shared cytobands across ALL tumor types  
+shared_cytobands <- results_cytoband %>%
+  group_by(Cytoband) %>%
+  summarise(n_tumors = n_distinct(CANCER_TYPE), .groups = "drop") %>%
+  filter(n_tumors == length(unique(results_cytoband$CANCER_TYPE))) %>%
+  pull(Cytoband)
+
+cat("Shared cytobands:", length(shared_cytobands), "\n")
+
+# Filter to shared cytobands only
+results_cytoband_shared <- results_cytoband %>%
+  filter(Cytoband %in% shared_cytobands) %>%
+  mutate(
+    Event      = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    ArmLabel   = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+    chr_num    = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num    = ifelse(is.na(chr_num),
+                        ifelse(str_detect(Cytoband, "^X"), 23, 24),
+                        chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]")
+  )
+
+# Genomic order
+cyto_levels_shared <- results_cytoband_shared %>%
+  arrange(chr_num, arm_suffix, Cytoband) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_cytoband_shared$Cytoband <- factor(
+  results_cytoband_shared$Cytoband,
+  levels = cyto_levels_shared
+)
+
+# One label per arm
+axis_labels_shared <- results_cytoband_shared %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n() / 2)], .groups = "drop")
+```
+
+
+```{r}
+# Plot 
+#dir.create("logHR_plots_updated", showWarnings = FALSE)
+
+for (tumor in unique(results_cytoband_shared$CANCER_TYPE)) {
+  plot_data <- results_cytoband_shared %>% filter(CANCER_TYPE == tumor)
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = sign_logP, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+
+    # Chromosome boundary lines (vertical)
+    geom_vline(xintercept = which(levels(plot_data$Cytoband) %in%
+                 (plot_data %>%
+                    group_by(chr_num) %>%
+                    summarise(first = Cytoband[1], .groups = "drop") %>%
+                    pull(first))),
+               color = "grey60", linewidth = 0.3, linetype = "dashed") +
+
+    # Significance lines
+    geom_hline(yintercept =  -log10(0.05), linetype = "dotted", color = "grey60", linewidth = 0.3) +
+    geom_hline(yintercept =   log10(0.05), linetype = "dotted", color = "grey60", linewidth = 0.3) +
+    geom_hline(yintercept =  -log10(0.01), linetype = "dotted", color = "grey40", linewidth = 0.3) +
+    geom_hline(yintercept =   log10(0.01), linetype = "dotted", color = "grey40", linewidth = 0.3) +
+    geom_hline(yintercept = 0, linetype = "solid", linewidth = 0.4, color = "black") +
+
+    annotate("text", x = Inf, y = -log10(0.05), label = "p<0.05",
+             hjust = 1.1, size = 2.8, color = "grey40") +
+    annotate("text", x = Inf, y =  log10(0.05), label = "p<0.05",
+             hjust = 1.1, size = 2.8, color = "grey40") +
+    annotate("text", x = Inf, y = -log10(0.01), label = "p<0.01",
+             hjust = 1.1, size = 2.8, color = "grey20") +
+    annotate("text", x = Inf, y =  log10(0.01), label = "p<0.01",
+             hjust = 1.1, size = 2.8, color = "grey20") +
+
+    scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+    scale_x_discrete(
+      breaks = axis_labels_shared$Cytoband,
+      labels = axis_labels_shared$ArmLabel
+    ) +
+    scale_y_continuous(limits = c(-2, 4), breaks = c(-2, 0, 2, 4)) +
+    theme_bw()+
+    labs(
+      title = paste0(tumor, " – Association with Patient Survival"),
+      x     = "Chromosome",
+      y     = "Signed –log10(p)",
+      fill  = "Event"
+    ) +
+    theme(
+      axis.text.x        = element_text(angle = 90, size = 6),
+      plot.title         = element_text(face = "bold", size = 12),
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white"),
+      plot.background  = element_rect(fill = "white"),
+      panel.border     = element_blank(),          
+      axis.line        = element_line(color = "black", linewidth = 0.4) 
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_updated/", gsub(" ", "_", tumor), ".pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+
+
+```{r}
+# Check factor levels in new file for one example
+subset_test <- df_cyto %>%
+  filter(CANCER_TYPE == "Melanoma", DRUG_TYPE == "PD-1/PDL-1") %>%
+  filter(!!sym("1q21.1") %in% c("None", "Gain")) %>%
+  mutate(CNV = factor(!!sym("1q21.1"), levels = c("Gain", "None")))
+
+cat("Factor levels:", levels(subset_test$CNV), "\n")
+# Should be "Gain" "None" — Gain is reference
+# HR > 1 means Gain has worse survival than None
+```
+
+```{r}
+# Check a specific cytoband manually
+subset_test <- df_cyto %>%
+  filter(CANCER_TYPE == "Melanoma", DRUG_TYPE == "PD-1/PDL-1") %>%
+  filter(`1q21.1` %in% c("None", "Gain")) %>%
+  mutate(CNV = factor(`1q21.1`, levels = c("Gain", "None"))) %>%
+  filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore, data = subset_test)
+cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+
+hr <- exp(coef(fit)[cnv_term])
+p  <- summary(fit)$coefficients[cnv_term, 5]
+
+cat("HR:", hr, "\n")
+cat("log2HR:", log2(hr), "\n")
+cat("sign:", sign(log2(hr)), "\n")
+cat("sign_logP:", -log10(p) * sign(log2(hr)), "\n")
+```
+
+# Figure 5 Align BLCA 
+## arm level 
+```{r}
+# ── Build everything from scratch ─────────────────────────────────────────────
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival")
+
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt",  skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt", check.names = FALSE) %>%
+  rownames_to_column(var = "SAMPLE_ID")
+
+arm_cols      <- grep("^Arm",           names(cnv_raw), value = TRUE)
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+cat("Arm11p in arm_cols:", "Arm11p" %in% arm_cols, "\n")
+cat("Total arm cols:", length(arm_cols), "\n")
+```
+
+```{r}
+# Categorize CNVs for BOTH arm and cytoband columns
+cnv_cat <- cnv_raw %>%
+  mutate(across(all_of(c(arm_cols, cytoband_cols)), ~ case_when(
+    .x >  0.2 ~ "Gain",
+    .x < -0.2 ~ "Loss",
+    TRUE       ~ "None"
+  )))
+```
+
+```{r}
+# Build df_arm 
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE)
+
+merged_sample_arm <- sample_info %>%
+  left_join(cnv_cat, by = "SAMPLE_ID")    # CHANGED: cnv_cat_arm → cnv_cat
+
+df_arm <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, DRUG_TYPE) %>%
+  left_join(merged_sample_arm, by = "PATIENT_ID") %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+
+cat("Rows in df_arm:", nrow(df_arm), "\n")
+cat("DRUG_TYPE values:", unique(df_arm$DRUG_TYPE), "\n")
+cat("Arm11p column exists:", "Arm11p" %in% colnames(df_arm), "\n")
+```
+
+```{r}
+# Filter to BLCA + PD-1/PDL-1 in BLCA
+BLCA_data <- df_arm %>%
+  filter(CANCER_TYPE == "Bladder Cancer", DRUG_TYPE == "PD-1/PDL-1")
+
+cat("Rows in tumor_data:", nrow(BLCA_data), "\n")
+table(BLCA_data$Arm11p)
+```
+```{r}
+# ── Arm-level Cox regression for BLCA across all arms ────────────────────────
+results_blca_armlevel <- data.frame()
+
+for (arm in arm_cols) {
+  for (comparison in c("Gain", "Loss")) {
+    subset <- BLCA_data %>%
+      filter(!!sym(arm) %in% c("None", comparison)) %>%
+      mutate(CNV = factor(!!sym(arm), levels = c("None", comparison)))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+      tryCatch({
+        fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+        cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+        if (length(cnv_term) != 1) next
+
+        hr  <- exp(coef(fit)[cnv_term])
+        p   <- summary(fit)$coefficients[cnv_term, 5]
+
+        results_blca_armlevel <- rbind(results_blca_armlevel, data.frame(
+          CANCER_TYPE = "Bladder Cancer",
+          Arm         = arm,
+          Comparison  = comparison,
+          HR          = round(hr, 3),
+          log2HR      = log2(hr),
+          sign_logP   = -log10(p) * sign(log2(hr)),
+          P           = signif(p, 3),
+          N           = nrow(subset)
+        ))
+      }, error = function(e) {
+        message(paste("Skipped:", arm, comparison, "-", e$message))
+      })
+    }
+  }
+}
+
+cat("Arm-level results:", nrow(results_blca_armlevel), "\n")
+results_blca_armlevel %>% filter(Arm == "Arm11p")
+```
+
+```{r}
+# ── Plot BLCA survival ────────────────────────────────────────────────────────
+results_blca_armlevel <- results_blca_armlevel %>%
+  mutate(
+    Event      = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    ArmName    = gsub("Arm", "", Arm),
+    chr_num    = as.numeric(str_extract(ArmName, "^[0-9]+")),
+    chr_num    = ifelse(is.na(chr_num),
+                        ifelse(str_detect(ArmName, "^X"), 23, 24),
+                        chr_num),
+    arm_suffix = str_extract(ArmName, "[pq]")
+  )
+
+arm_levels <- results_blca_armlevel %>%
+  arrange(chr_num, arm_suffix) %>%
+  pull(ArmName) %>%
+  unique()
+
+results_blca_armlevel$ArmName <- factor(results_blca_armlevel$ArmName, levels = arm_levels)
+
+p_blca_arm <- ggplot(results_blca_armlevel, aes(x = ArmName, y = sign_logP, fill = Event)) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_hline(yintercept =  -log10(0.05), linetype = "dotted", color = "grey60") +
+  geom_hline(yintercept =   log10(0.05), linetype = "dotted", color = "grey60") +
+  geom_hline(yintercept =  -log10(0.01), linetype = "dotted", color = "grey40") +
+  geom_hline(yintercept =   log10(0.01), linetype = "dotted", color = "grey40") +
+  geom_hline(yintercept = 0, linetype = "solid") +
+  scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+  labs(
+    title = "BLCA (bladder) – Arm-level Association with Patients' Survival",
+    x     = "Chromosome Arm",
+    y     = "Signed –log10(p)",
+    fill  = "Event"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, size = 7),
+    plot.title  = element_text(face = "bold", size = 12)
+  )
+
+print(p_blca_arm)
+
+ggsave("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated/BLCA_survival_armlevel.pdf",
+       plot = p_blca_arm, width = 12, height = 4)
+```
+
+## cytoband level 
+```{r}
+is_cnv_blca <- read.csv(
+  "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/Resubmission_SCNAs/IS_CNV_cytolevel.csv",
+  check.names = FALSE
+)
+
+# Get the cytobands from IS_CNV file
+is_cnv_cytobands <- unique(is_cnv_blca$Cytoband)
+cat("Cytobands in IS_CNV:", length(is_cnv_cytobands), "\n")
+```
+
+```{r}
+cat("Cytoband cols found:", length(cytoband_cols), "\n")
+cat("11p15.5 in cytoband_cols:", "11p15.5" %in% cytoband_cols, "\n")
+```
+
+```{r}
+# Categorize CYTOBAND columns only
+cnv_cat_cytoband <- cnv_raw %>%
+  mutate(across(all_of(cytoband_cols), ~ case_when(
+    .x >  0.2 ~ "Gain",
+    .x < -0.2 ~ "Loss",
+    TRUE       ~ "None"
+  )))
+
+cat("Class of 11p15.5 after categorization:", class(cnv_cat_cytoband$`11p15.5`), "\n")
+table(cnv_cat_cytoband$`11p15.5`)
+```
+```{r}
+# Build df_cyto
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, TUMOR_PURITY)
+
+merged_sample_cytoband <- sample_info %>%
+  left_join(cnv_cat_cytoband, by = "SAMPLE_ID")
+
+df_cyto <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, DRUG_TYPE) %>%
+  left_join(merged_sample_cytoband, by = "PATIENT_ID") %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+
+cat("Rows in df_cyto:", nrow(df_cyto), "\n")
+cat("Class of 11p15.5 in df_cyto:", class(df_cyto$`11p15.5`), "\n")
+table(df_cyto$`11p15.5`)
+```
+
+
+```{r}
+# Run Cox regression for BLCA  
+# First build df_cyto as before (same setup chunks)
+# Then filter to only cytobands present in IS_CNV file
+
+results_blca <- data.frame()
+
+tumor_data <- df_cyto %>%
+  filter(CANCER_TYPE == "Bladder Cancer", DRUG_TYPE == "PD-1/PDL-1")
+
+# Only run Cox for cytobands that exist in IS_CNV file
+shared_bands <- intersect(cytoband_cols, is_cnv_cytobands)
+cat("Shared cytobands between MSK and IS_CNV:", length(shared_bands), "\n")
+
+for (band in shared_bands) {
+  for (comparison in c("Gain", "Loss")) {
+    subset <- tumor_data %>%
+      filter(!!sym(band) %in% c("None", comparison)) %>%
+      mutate(CNV = factor(!!sym(band), levels = c("None", comparison)))  
+      #filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+      tryCatch({
+        fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV,
+                     data = subset)
+        cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+        if (length(cnv_term) != 1) next
+
+        hr  <- exp(coef(fit)[cnv_term])
+        p   <- summary(fit)$coefficients[cnv_term, 5]
+
+        results_blca <- rbind(results_blca, data.frame(
+          CANCER_TYPE = "Bladder Cancer",
+          Cytoband    = band,
+          Comparison  = comparison,
+          HR          = round(hr, 3),
+          log2HR      = log2(hr),
+          sign_logP   = -log10(p) * sign(log2(hr)),
+          P           = signif(p, 3),
+          N           = nrow(subset)
+        ))
+      }, error = function(e) {
+        message(paste("Skipped:", band, comparison, "-", e$message))
+      })
+    }
+  }
+}
+
+cat("BLCA survival results:", nrow(results_blca), "\n")
+```
+
+
+```{r}
+# Plot WITHOUT filling missing cytobands - using results_blca BEFORE the fill-in step
+# (only the 1595 rows you originally got from the Cox loop)
+
+results_blca_nofill <- results_blca_complete %>%
+  filter(N > 0)  # keep only cytobands that actually had a Cox model run
+
+cat("Rows without fill-in:", nrow(results_blca_nofill), "\n")
+
+# Order cytobands (only the ones that exist)
+results_blca_nofill <- results_blca_nofill %>%
+  mutate(
+    ArmLabel   = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+    chr_num    = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num    = ifelse(is.na(chr_num),
+                        ifelse(str_detect(Cytoband, "^X"), 23, 24),
+                        chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]")
+  )
+
+cyto_levels_nofill <- results_blca_nofill %>%
+  arrange(chr_num, arm_suffix, Cytoband) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_blca_nofill$Cytoband <- factor(results_blca_nofill$Cytoband, levels = cyto_levels_nofill)
+
+axis_labels_nofill <- results_blca_nofill %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n() / 2)], .groups = "drop")
+
+# Plot
+p_blca_nofill <- ggplot(results_blca_nofill, aes(x = Cytoband, y = sign_logP, fill = Event, group = Event)) +
+  geom_area(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "solid", linewidth = 0.4, color = "black") +
+  scale_fill_manual(values  = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+  scale_x_discrete(
+    breaks = axis_labels_nofill$Cytoband,
+    labels = axis_labels_nofill$ArmLabel
+  ) +
+  labs(
+    title = "BLCA – Survival (NO fill-in, real data only)",
+    x = "Chromosome", y = "Signed –log10(p)", fill = "Event"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, size = 6))
+
+print(p_blca_nofill)
+```
+
+
+
+
+## align 
+```{r}
+# ── Fill in missing cytobands with 0 so all 805 shared bands are present ──────
+all_combinations <- expand.grid(
+  Cytoband   = shared_bands,
+  Comparison = c("Gain", "Loss"),
+  stringsAsFactors = FALSE
+)
+
+results_blca_complete <- all_combinations %>%
+  left_join(results_blca, by = c("Cytoband", "Comparison")) %>%
+  mutate(
+    CANCER_TYPE = "Bladder Cancer",
+    HR          = ifelse(is.na(HR),       1, HR),
+    log2HR      = ifelse(is.na(log2HR),   0, log2HR),
+    sign_logP   = ifelse(is.na(sign_logP),0, sign_logP),
+    P           = ifelse(is.na(P),        1, P),
+    N           = ifelse(is.na(N),        0, N),
+    Event       = ifelse(Comparison == "Gain", "Gain", "Loss")
+  )
+
+# Replace results_blca with complete version
+results_blca <- results_blca_complete
+
+cat("Complete BLCA results:", nrow(results_blca), "\n")
+cat("Expected:", length(shared_bands) * 2, "\n")
+```
+
+```{r}
+# ── Order cytobands to match IS_CNV file order ────────────────────────────────
+results_blca <- results_blca %>%
+  mutate(
+    Event      = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    ArmLabel   = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+    chr_num    = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num    = ifelse(is.na(chr_num),
+                        ifelse(str_detect(Cytoband, "^X"), 23, 24),
+                        chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]")
+  )
+
+# Genomic order matching IS_CNV
+cyto_levels_blca <- results_blca %>%
+  arrange(chr_num, arm_suffix, Cytoband) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_blca$Cytoband <- factor(results_blca$Cytoband, levels = cyto_levels_blca)
+
+axis_labels_blca <- results_blca %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n() / 2)], .groups = "drop")
+```
+
+```{r}
+# ── Plot BLCA survival ────────────────────────────────────────────────────────
+p_blca <- ggplot(results_blca, aes(x = Cytoband, y = sign_logP, fill = Event, group = Event)) +
+  geom_area(alpha = 0.8) +    # filled area
+  #geom_line(aes(color = Event), linewidth = 0.3) + # outline
+  geom_vline(xintercept = which(levels(results_blca$Cytoband) %in%
+               (results_blca %>%
+                  group_by(chr_num) %>%
+                  summarise(first = Cytoband[1], .groups = "drop") %>%
+                  pull(first))),
+             color = "grey60", linewidth = 0.3, linetype = "dashed") +
+  geom_hline(yintercept =  -log10(0.05), linetype = "dotted", color = "grey60", linewidth = 0.3) +
+  geom_hline(yintercept =   log10(0.05), linetype = "dotted", color = "grey60", linewidth = 0.3) +
+  geom_hline(yintercept =  -log10(0.01), linetype = "dotted", color = "grey40", linewidth = 0.3) +
+  geom_hline(yintercept =   log10(0.01), linetype = "dotted", color = "grey40", linewidth = 0.3) +
+  geom_hline(yintercept = 0, linetype = "solid", linewidth = 0.4, color = "black") +
+  scale_fill_manual(values  = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+  #scale_color_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+  scale_x_discrete(
+    breaks = axis_labels_blca$Cytoband,
+    labels = axis_labels_blca$ArmLabel
+  ) +
+  scale_y_continuous(limits = c(-2, 4), breaks = c(-2, 0, 2, 4)) +
+  labs(
+    title = "BLCA (bladder) – Association with Patients' Survival – anti PD1/PD-L1",
+    x     = "Chromosome",
+    y     = "Signed –log10(p)",
+    fill  = "Event"
+  ) +
+  guides(color = "none") +   # hide duplicate color legend
+  theme_bw() +
+  theme(
+    axis.text.x      = element_text(angle = 90, size = 6),
+    plot.title       = element_text(face = "bold", size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    plot.background  = element_rect(fill = "white"),
+    panel.border     = element_blank(),
+    axis.line        = element_line(color = "black", linewidth = 0.4)
+  )
+
+ggsave("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated/BLCA_survival_aligned.pdf",
+       plot = p_blca, width = 12, height = 4)
+
+p_blca 
+```
+
+
+```{r}
+cytobands_11p <- grep("^11p", cytoband_cols, value = TRUE)
+cat("11p cytobands:", cytobands_11p, "\n\n")
+
+results_11p_check <- data.frame()
+
+for (band in cytobands_11p) {
+  for (comparison in c("Gain", "Loss")) {
+
+    subset_unadj <- tumor_data %>%
+      filter(!!sym(band) %in% c("None", comparison)) %>%
+      mutate(CNV = factor(!!sym(band), levels = c("None", comparison)))
+
+    subset_adj <- subset_unadj %>%
+      filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+    if (nrow(subset_unadj) >= 10 && length(unique(subset_unadj$CNV)) == 2) {
+
+      p_unadj <- NA
+      p_adj   <- NA
+
+      # Unadjusted
+      tryCatch({
+        fit_unadj <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset_unadj)
+        cnv_term  <- grep("^CNV", names(coef(fit_unadj)), value = TRUE)
+        if (length(cnv_term) == 1 && is.finite(coef(fit_unadj)[cnv_term])) {
+          p_unadj <- summary(fit_unadj)$coefficients[cnv_term, "Pr(>|z|)"]
+        }
+      }, error = function(e) {
+        message(paste("Unadjusted failed:", band, comparison, "-", e$message))
+      })
+
+      # Adjusted
+      if (nrow(subset_adj) >= 10 && length(unique(subset_adj$CNV)) == 2) {
+        tryCatch({
+          fit_adj  <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore, data = subset_adj)
+          cnv_term <- grep("^CNV", names(coef(fit_adj)), value = TRUE)
+          if (length(cnv_term) == 1 && is.finite(coef(fit_adj)[cnv_term])) {
+            p_adj <- summary(fit_adj)$coefficients[cnv_term, "Pr(>|z|)"]
+          }
+        }, error = function(e) {
+          message(paste("Adjusted failed:", band, comparison, "-", e$message))
+        })
+      }
+
+      results_11p_check <- rbind(results_11p_check, data.frame(
+        Cytoband      = band,
+        Comparison    = comparison,
+        N_unadj       = nrow(subset_unadj),
+        N_adj         = nrow(subset_adj),
+        P_unadjusted  = signif(p_unadj, 3),
+        P_adjusted    = signif(p_adj, 3)
+      ))
+    }
+  }
+}
+
+print(results_11p_check)
+```
+
+
+
+
+# threshold 0.3
+```{r}
+library(gtools)  # for mixedsort()
+
+# ── Rebuild df with 0.3 threshold (matching colleague's code) ────────────────
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival")
+
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt", skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt", check.names = FALSE, quote = "\"") %>%
+  tibble::rownames_to_column("SAMPLE_ID")
+
+clin_smp$SAMPLE_ID <- as.character(clin_smp$SAMPLE_ID)
+cnv_raw$SAMPLE_ID  <- as.character(cnv_raw$SAMPLE_ID)
+
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+arm_cols      <- grep("^Arm", names(cnv_raw), value = TRUE)
+
+# Categorize at 0.3 threshold (NOT 0.2)
+cnv_cat <- cnv_raw %>%
+  mutate(across(all_of(c(cytoband_cols, arm_cols)), ~ case_when(
+    .x >  0.3 ~ "Gain",
+    .x < -0.3 ~ "Loss",
+    TRUE      ~ "None"
+  )))
+
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, SAMPLE_TYPE)
+
+merged_sample <- sample_info %>%
+  left_join(cnv_cat, by = "SAMPLE_ID")
+
+df <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+  left_join(merged_sample, by = "PATIENT_ID") %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+
+cat("Total patients:", length(unique(df$PATIENT_ID)), "\n")
+```
+
+```{r}
+# Run Cox regression for BLCA cytobands  
+results_cytoband <- data.frame()
+
+tumor_data <- df %>% filter(CANCER_TYPE == "Bladder Cancer", DRUG_TYPE == "PD-1/PDL-1")
+
+for (band in cytoband_cols) {
+  for (comparison in c("Gain", "Loss")) {
+    subset <- tumor_data %>%
+      filter(!!sym(band) %in% c("None", comparison)) %>%
+      mutate(CNV = factor(!!sym(band), levels = c("None", comparison)))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+      tryCatch({
+        fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+        hr  <- exp(coef(fit))
+        p   <- summary(fit)$coefficients[5]
+
+        results_cytoband <- rbind(results_cytoband, data.frame(
+          CANCER_TYPE = "Bladder Cancer",
+          Cytoband    = band,
+          Comparison  = comparison,
+          HR          = round(hr, 3),
+          CI          = paste(round(exp(confint(fit)), 3)[1],
+                              round(exp(confint(fit)), 3)[2], sep = " - "),
+          P           = signif(p, 3),
+          log2HR      = log2(hr),
+          Event       = comparison,
+          N           = nrow(subset),
+          sign_logP   = -log10(p) * sign(log2(hr))
+        ))
+      }, error = function(e) {
+        # Still add the cytoband with 0 if Cox fails
+        results_cytoband <<- rbind(results_cytoband, data.frame(
+          CANCER_TYPE = "Bladder Cancer",
+          Cytoband    = band,
+          Comparison  = comparison,
+          HR          = 1, CI = "0", P = 1,
+          log2HR      = 0, Event = comparison,
+          N           = nrow(subset), sign_logP = 0
+        ))
+      })
+    } else {
+      # ADD cytobands that fail the filter with sign_logP = 0
+      results_cytoband <- rbind(results_cytoband, data.frame(
+        CANCER_TYPE = "Bladder Cancer",
+        Cytoband    = band,
+        Comparison  = comparison,
+        HR          = 1, CI = "0", P = 1,
+        log2HR      = 0, Event = comparison,
+        N           = nrow(subset), sign_logP = 0
+      ))
+    }
+  }
+}
+
+cat("BLCA results:", nrow(results_cytoband), "\n")
+cat("Expected:", length(cytoband_cols) * 2, "\n")
+# Add signed -log10(p)
+results_cytoband <- results_cytoband %>%
+  mutate(sign_logP = -log10(P) * sign(log2HR))
+
+cat("BLCA results:", nrow(results_cytoband), "\n")
+```
+
+```{r}
+# Plot
+out_dir <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+plot_cnv_area <- function(df, tumour, signif_cut = 1.3) {
+
+  chr_levels <- c(as.character(1:22), "X", "Y")
+
+  pd <- df %>%
+    filter(CANCER_TYPE == tumour) %>%
+    mutate(Arm        = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+           Chromosome = str_extract(Arm, "^[0-9XY]+"),
+           Chromosome = factor(Chromosome, levels = chr_levels)) %>%
+    arrange(Chromosome, Cytoband) %>%
+    mutate(Cytoband = factor(Cytoband, levels = mixedsort(unique(Cytoband))),
+           idx      = row_number())
+
+  centromere_idx <- pd %>% filter(str_detect(Arm, "q")) %>%
+    group_by(Chromosome) %>% slice_head(n = 1) %>% pull(idx)
+
+  chr_last_idx <- pd %>% group_by(Chromosome) %>%
+    slice_tail(n = 1) %>% pull(idx)
+
+  chr_mid_idx <- pd %>% group_by(Chromosome) %>%
+    summarise(idx = floor(mean(range(idx))), .groups = "drop")
+
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = 0.75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+    geom_hline(yintercept = c(-signif_cut, signif_cut),
+               colour = "grey40", linetype = "dashed", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5, colour = "grey30", linetype = "dashed",linewidth = .3) +
+    geom_vline(xintercept = centromere_idx, colour = "grey",
+               linetype = "dashed", linewidth = .2) +
+    scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx,
+                       labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    labs(title = paste("Signed -log10(p) CNV Survival –", tumour),
+         x = "chromosome",
+         y = "signed -log(p)",
+         fill = "Event") +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x      = element_text(size = 6),
+          plot.title       = element_text(face = "bold", size = 12))
+}
+
+p_blca <- plot_cnv_area(results_cytoband, "Bladder Cancer")
+print(p_blca)
+
+ggsave(file.path(out_dir, "Bladder_Cancer_0.3_no_covariate.pdf"),
+       p_blca, width = 10, height = 5, useDingbats = FALSE)
+```
+
+## use padj 
+```{r}
+# Apply padj 
+results_cytoband_padj <- results_cytoband %>%
+  mutate(
+    sign_logP = -log10(p.adjust(P, method = "BH")) * sign(log2HR)
+  )
+
+cat("rows:", nrow(results_cytoband_padj), "\n")
+```
+
+```{r}
+# Plot 
+plot_cnv_area_padj <- function(df, tumour) {
+  chr_levels <- c(as.character(1:22), "X", "Y")
+  pd <- df %>%
+    filter(CANCER_TYPE == tumour) %>%
+    mutate(Arm        = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+           Chromosome = str_extract(Arm, "^[0-9XY]+"),
+           Chromosome = factor(Chromosome, levels = chr_levels)) %>%
+    arrange(Chromosome, Cytoband) %>%
+    mutate(Cytoband = factor(Cytoband, levels = mixedsort(unique(Cytoband))),
+           idx      = row_number())
+
+  centromere_idx <- pd %>% filter(str_detect(Arm, "q")) %>%
+    group_by(Chromosome) %>% slice_head(n = 1) %>% pull(idx)
+  chr_last_idx <- pd %>% group_by(Chromosome) %>%
+    slice_tail(n = 1) %>% pull(idx)
+  chr_mid_idx <- pd %>% group_by(Chromosome) %>%
+    summarise(idx = floor(mean(range(idx))), .groups = "drop")
+
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = 0.75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+   
+     # Thresholds at padj < 0.2 and padj < 0.05
+    geom_hline(yintercept = c(-log10(0.2), log10(0.2)),
+               colour = "grey", linetype = "dotted", linewidth = .25) +
+    geom_hline(yintercept = c(-log10(0.05), log10(0.05)),
+               colour = "grey", linetype = "dotted", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5,
+               colour = "grey50", linewidth = 0.3, linetype = "dashed") +
+    geom_vline(xintercept = centromere_idx,
+               colour = "grey80", linewidth = 0.2, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx,
+                       labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    scale_y_continuous(limits = c(-1.3, 4), breaks = c(-1.3, 2, 4)) +
+    labs(title = paste("Signed -log10(padj) CNV Survival –", tumour),
+         x = "chromosome",
+         y = "signed -log10(padj)",    # CHANGED: label reflects padj
+         fill = "Event") +
+    theme_bw() +
+    theme(panel.border     = element_blank(),
+          panel.grid       = element_blank(),
+          axis.line        = element_line(linewidth = .25),
+          axis.text.x      = element_text(size = 6),
+          plot.title       = element_text(face = "bold", size = 12))
+}
+
+# ── STEP 3: Plot ──────────────────────────────────────────────────────────────
+p_blca_padj <- plot_cnv_area_padj(results_cytoband_padj, "Bladder Cancer")
+print(p_blca_padj)
+
+
+ggsave("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated/Bladder_Cancer_0.3_padj.pdf",
+       plot = p_blca_padj, width = 10, height = 5, useDingbats = FALSE)
+```
+
+
+Furhter align to IS plot 
+```{r}
+# ── Load IS_CNV cytobands for alignment ───────────────────────────────────────
+is_cnv_blca <- read.csv(
+  "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/Resubmission_SCNAs/IS_CNV_cytolevel.csv",
+  check.names = FALSE
+)
+is_cnv_cytobands <- unique(is_cnv_blca$Cytoband)
+shared_bands <- intersect(cytoband_cols, is_cnv_cytobands)
+cat("Shared bands:", length(shared_bands), "\n")
+```
+
+```{r}
+# ── Fill in missing cytobands with 0 for alignment ───────────────────────────
+all_combinations <- expand.grid(
+  Cytoband   = shared_bands,
+  Comparison = c("Gain", "Loss"),
+  stringsAsFactors = FALSE
+)
+
+results_cytoband_aligned <- all_combinations %>%
+  left_join(results_cytoband, by = c("Cytoband", "Comparison")) %>%
+  mutate(
+    CANCER_TYPE = "Bladder Cancer",
+    HR          = ifelse(is.na(HR),       1, HR),
+    log2HR      = ifelse(is.na(log2HR),   0, log2HR),
+    sign_logP   = ifelse(is.na(sign_logP),0, sign_logP),
+    P           = ifelse(is.na(P),        1, P),
+    N           = ifelse(is.na(N),        0, N),
+    Event       = ifelse(Comparison == "Gain", "Gain", "Loss")
+  )
+
+cat("Aligned results:", nrow(results_cytoband_aligned), "\n")
+cat("Expected:", length(shared_bands) * 2, "\n")
+```
+
+```{r}
+# Apply padj to aligned version
+results_cytoband_aligned_padj <- results_cytoband_aligned %>%
+  mutate(
+    sign_logP = -log10(p.adjust(P, method = "BH")) * sign(log2HR)
+  )
+
+# run plot_cnv_area_padj
+plot_cnv_area_padj <- function(df, tumour) {
+  chr_levels <- c(as.character(1:22), "X", "Y")
+
+  pd <- df %>%
+    filter(CANCER_TYPE == tumour) %>%
+    mutate(Arm        = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+           Chromosome = str_extract(Arm, "^[0-9XY]+"),
+           Chromosome = factor(Chromosome, levels = chr_levels)) %>%
+    arrange(Chromosome, Cytoband) %>%
+    mutate(
+      Cytoband = factor(Cytoband, levels = mixedsort(shared_bands)),
+      idx      = as.integer(Cytoband)  # CHANGED: use factor level position, not row_number()
+    )
+
+  centromere_idx <- pd %>% filter(str_detect(Arm, "q")) %>%
+    group_by(Chromosome) %>% slice_head(n = 1) %>% pull(idx)
+  chr_last_idx <- pd %>% group_by(Chromosome) %>%
+    slice_tail(n = 1) %>% pull(idx)
+  chr_mid_idx <- pd %>% group_by(Chromosome) %>%
+    summarise(idx = floor(mean(range(idx))), .groups = "drop")
+
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = 0.75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+    geom_hline(yintercept = c(-log10(0.2), log10(0.2)),
+               colour = "grey", linetype = "dotted", linewidth = .25) +
+    geom_hline(yintercept = c(-log10(0.05), log10(0.05)),
+               colour = "grey", linetype = "dotted", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5,
+               colour = "grey50", linewidth = 0.3, linetype = "dashed") +
+    geom_vline(xintercept = centromere_idx,
+               colour = "grey80", linewidth = 0.2, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx,
+                       labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    scale_y_continuous(limits = c(-1.3, 4), breaks = c(-1.3, 2, 4)) +
+    labs(title = paste("Signed -log10(padj) CNV Survival –", tumour),
+         x = "chromosome",
+         y = "signed -log10(padj)",
+         fill = "Event") +
+    theme_bw() +
+    theme(panel.border = element_blank(),
+          panel.grid   = element_blank(),
+          axis.line    = element_line(linewidth = .25),
+          axis.text.x  = element_text(size = 6),
+          plot.title   = element_text(face = "bold", size = 12))
+}
+# plot 
+p_blca_aligned_padj <- plot_cnv_area_padj(results_cytoband_aligned_padj, "Bladder Cancer")
+print(p_blca_aligned_padj)
+
+ggsave("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated/Bladder_Cancer_aligned_padj.pdf",
+       plot = p_blca_padj, width = 10, height = 5, useDingbats = FALSE)
+```
+
+## Include covariate 
+```{r}
+# ── Need to merge in TUMOR_PURITY and AneuploidyScore first ──────────────────
+# Calculate aneuploidy score from cytoband data
+aneuploidy_cytoband <- cnv_raw %>%
+  select(SAMPLE_ID, all_of(cytoband_cols)) %>%
+  mutate(AneuploidyScore = rowSums(abs(across(all_of(cytoband_cols))), na.rm = TRUE)) %>%
+  select(SAMPLE_ID, AneuploidyScore)
+
+# Add TUMOR_PURITY and AneuploidyScore to sample_info
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, SAMPLE_TYPE, TUMOR_PURITY) %>%
+  left_join(aneuploidy_cytoband, by = "SAMPLE_ID")
+
+merged_sample <- sample_info %>%
+  left_join(cnv_cat, by = "SAMPLE_ID")
+
+df <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+  left_join(merged_sample, by = "PATIENT_ID") %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+```
+
+```{r}
+# ── Run Cox regression WITH covariates (0.3 threshold) ────────────────────────
+results_cytoband_adj <- data.frame()
+
+tumor_data <- df %>% filter(CANCER_TYPE == "Bladder Cancer", DRUG_TYPE == "PD-1/PDL-1")
+
+for (band in cytoband_cols) {
+  for (comparison in c("Gain", "Loss")) {
+    subset <- tumor_data %>%
+      filter(!!sym(band) %in% c("None", comparison)) %>%
+      mutate(CNV = factor(!!sym(band), levels = c("None", comparison))) %>%
+      filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+      tryCatch({
+        fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore, data = subset)
+        cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+        if (length(cnv_term) != 1) next
+
+        hr  <- exp(coef(fit)[cnv_term])
+        p   <- summary(fit)$coefficients[cnv_term, 5]
+
+        results_cytoband_adj <- rbind(results_cytoband_adj, data.frame(
+          CANCER_TYPE = "Bladder Cancer",
+          Cytoband    = band,
+          Comparison  = comparison,
+          HR          = round(hr, 3),
+          log2HR      = log2(hr),
+          P           = signif(p, 3),
+          Event       = comparison,
+          N           = nrow(subset)
+        ))
+      }, error = function(e) {
+        message(paste("Skipped:", band, comparison, "-", e$message))
+      })
+    }
+  }
+}
+
+results_cytoband_adj <- results_cytoband_adj %>%
+  mutate(sign_logP = -log10(P) * sign(log2HR))
+
+cat("Adjusted results:", nrow(results_cytoband_adj), "\n")
+
+# Check 11p specifically
+results_cytoband_adj %>% filter(str_detect(Cytoband, "^11p")) %>% arrange(P)
+```
+
+```{r}
+# Plot
+out_dir <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+# ── Plot adjusted version using same function as colleague's code ─────────────
+library(gtools)
+
+plot_cnv_area_adj <- function(df, tumour, signif_cut = 1.3) {
+
+  chr_levels <- c(as.character(1:22), "X", "Y")
+
+  pd <- df %>%
+    filter(CANCER_TYPE == tumour) %>%
+    mutate(Arm        = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+           Chromosome = str_extract(Arm, "^[0-9XY]+"),
+           Chromosome = factor(Chromosome, levels = chr_levels)) %>%
+    arrange(Chromosome, Cytoband) %>%
+    mutate(Cytoband = factor(Cytoband, levels = mixedsort(unique(Cytoband))),
+           idx      = row_number())
+
+  centromere_idx <- pd %>% filter(str_detect(Arm, "q")) %>%
+    group_by(Chromosome) %>% slice_head(n = 1) %>% pull(idx)
+
+  chr_last_idx <- pd %>% group_by(Chromosome) %>%
+    slice_tail(n = 1) %>% pull(idx)
+
+  chr_mid_idx <- pd %>% group_by(Chromosome) %>%
+    summarise(idx = floor(mean(range(idx))), .groups = "drop")
+
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = 0.75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+    geom_hline(yintercept = c(-signif_cut, signif_cut),
+               colour = "grey40", linetype = "dashed", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5, colour = "grey30", linetype = "dashed",linewidth = .3) +
+    geom_vline(xintercept = centromere_idx, colour = "grey",
+               linetype = "dashed", linewidth = .2) +
+    scale_fill_manual(values = c("Gain" = "#E8437A", "Loss" = "#5BC4E5")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx,
+                       labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    scale_y_continuous(limits = c(-2, 4), breaks = c(-2, 0, 2, 4)) +
+    labs(title = paste("Signed -log10(p) CNV Survival (Adjusted for AS & purity) –", tumour),
+         x = "chromosome",
+         y = "signed -log(p)",
+         fill = "Event") +
+    theme_bw() +
+    theme(panel.border     = element_blank(),
+          panel.grid       = element_blank(),
+          axis.line        = element_line(linewidth = .25),
+          axis.text.x      = element_text(size = 6),
+          plot.title       = element_text(face = "bold", size = 12))
+}
+
+# ── Print and save ────────────────────────────────────────────────────────────
+p_blca_adj <- plot_cnv_area_adj(results_cytoband_adj, "Bladder Cancer")
+print(p_blca_adj)
+
+ggsave("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/MSK_survival/logHR_plots_updated/BLCA_0.3_covariate.pdf",
+       plot = p_blca_adj, width = 12, height = 4)
+
+```
+
+# 4 tumor types — aligned (padj), same method as survival_0.3_fixed
+## Setup: 0.3 threshold, non-covariate Cox, keep every cytoband
+```{r}
+library(gtools)  # mixedsort()
+
+# Load + categorize at 0.3 (same as BLCA)
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt",  skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt", check.names = FALSE, quote = "\"") %>%
+  tibble::rownames_to_column("SAMPLE_ID")
+
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+cnv_cat <- cnv_raw %>%
+  mutate(across(all_of(cytoband_cols), ~ case_when(
+    .x >  0.3 ~ "Gain",
+    .x < -0.3 ~ "Loss",
+    TRUE      ~ "None"
+  )))
+
+df <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, DRUG_TYPE) %>%
+  left_join(
+    clin_smp %>%
+      select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE) %>%
+      left_join(cnv_cat, by = "SAMPLE_ID"),
+    by = "PATIENT_ID"
+  ) %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0L, 1L))
+
+# Optional: align band set to the IS plot (uncomment to use IS cytobands only)
+# is_cnv       <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/Resubmission_SCNAs/IS_CNV_cytolevel.csv", check.names = FALSE)
+# bands_to_use <- intersect(cytoband_cols, unique(is_cnv$Cytoband))
+bands_to_use <- cytoband_cols            # default: keep every cytoband
+cat("Bands used:", length(bands_to_use), "\n")
+```
+
+## Cox for all 4 tumors — ALWAYS keep a row (no missing cytobands)
+```{r}
+cancer_types_to_plot <- c(
+  "Head and Neck Cancer", "Melanoma",
+  "Non-Small Cell Lung Cancer", "Renal Cell Carcinoma"
+)
+
+results_4 <- data.frame()
+for (tumor in cancer_types_to_plot) {
+  td <- df %>% filter(CANCER_TYPE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+  cat("Running:", tumor, "- N:", nrow(td), "\n")
+  for (band in bands_to_use) {
+    for (comparison in c("Gain", "Loss")) {
+      sub <- td %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c("None", comparison)))
+      hr <- NA_real_; p <- NA_real_; n <- nrow(sub)
+      if (n >= 10 && length(unique(sub$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = sub)
+          hr  <- exp(coef(fit)[1]); p <- summary(fit)$coefficients[1, 5]
+        }, error = function(e) {})
+      }
+      results_4 <- rbind(results_4, data.frame(   # <- row kept no matter what
+        CANCER_TYPE = tumor, Cytoband = band, Comparison = comparison,
+        Event = comparison,
+        HR = ifelse(is.na(hr), 1, round(hr, 3)),
+        log2HR = ifelse(is.na(hr), 0, log2(hr)),
+        Raw_P_Cox = ifelse(is.na(p), 1, p), N = n, stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+cat("Total rows:", nrow(results_4),
+    " expected:", length(cancer_types_to_plot) * length(bands_to_use) * 2, "\n")
+```
+
+## Signed -log10(padj) + one shared genomic x-axis
+```{r}
+# BH-adjusted WITHIN each tumor. Same peak pattern as raw p, scaled down by FDR.
+# HNSC/RCC keep strong peaks; NSCLC has 0 bands surviving FDR (honest result).
+results_4 <- results_4 %>%
+  group_by(CANCER_TYPE) %>%
+  mutate(Padj      = p.adjust(Raw_P_Cox, method = "BH"),
+         sign_logP = -log10(Padj) * sign(log2HR),
+         sign_logP = ifelse(is.na(sign_logP) | is.infinite(sign_logP), 0, sign_logP)) %>%
+  ungroup()
+
+chr_levels <- c(as.character(1:22), "X", "Y")
+lev        <- mixedsort(bands_to_use)          # single level vector -> identical axes
+
+axis_ref <- tibble(Cytoband = factor(lev, levels = lev)) %>%
+  mutate(idx = as.integer(Cytoband),
+         Arm = str_extract(as.character(Cytoband), "^[0-9XY]+[pq]"),
+         Chromosome = factor(str_extract(Arm, "^[0-9XY]+"), levels = chr_levels),
+         arm_suffix = str_extract(Arm, "[pq]"))
+
+centromere_idx <- axis_ref %>% filter(arm_suffix == "q") %>%
+  group_by(Chromosome) %>% slice_min(idx, n = 1, with_ties = FALSE) %>% pull(idx)
+chr_last_idx <- axis_ref %>% group_by(Chromosome) %>%
+  slice_max(idx, n = 1, with_ties = FALSE) %>% pull(idx)
+chr_mid_idx  <- axis_ref %>% group_by(Chromosome) %>%
+  summarise(idx = floor(mean(range(idx))), .groups = "drop") %>% filter(!is.na(Chromosome))
+
+# padj reference lines: -log10(0.05)=1.30, -log10(0.2)=0.70
+sig_lines <- -log10(c(0.05, 0.2))
+```
+
+## Plot: individual aligned PDFs + one combined figure
+```{r}
+out_dir <- "logHR_plots_updated"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+plot_tumor <- function(dat, tumour) {
+  pd <- dat %>% filter(CANCER_TYPE == tumour) %>%
+    mutate(Cytoband = factor(Cytoband, levels = lev), idx = as.integer(Cytoband)) %>%
+    filter(!is.na(idx)) %>% arrange(idx)
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = .75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+    geom_hline(yintercept = c(-sig_lines, sig_lines),
+               colour = "grey40", linetype = "dotted", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5, colour = "black", linewidth = .3) +
+    geom_vline(xintercept = centromere_idx, colour = "grey30",
+               linewidth = .25, linetype = "dashed") +
+    scale_fill_manual(values = c(Gain = "#D64045", Loss = "#375E97")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx, labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    labs(title = paste("Signed -log10(padj) CNV Survival –", tumour),
+         x = "chromosome", y = "signed -log10(padj)", fill = "Event") +
+    theme_bw() +
+    theme(panel.border = element_blank(), panel.grid = element_blank(),
+          axis.line = element_line(linewidth = .25),
+          axis.text.x = element_text(size = 6),
+          plot.title = element_text(face = "bold", size = 12))
+}
+
+for (tm in cancer_types_to_plot) {
+  ggsave(file.path(out_dir, paste0(gsub(" ", "_", tm), "_aligned_padj.pdf")),
+         plot_tumor(results_4, tm), width = 10, height = 4, useDingbats = FALSE)
+}
+
+results_4f <- results_4 %>%
+  mutate(Cytoband = factor(Cytoband, levels = lev), idx = as.integer(Cytoband),
+         CANCER_TYPE = factor(CANCER_TYPE, levels = cancer_types_to_plot)) %>%
+  filter(!is.na(idx))
+
+p_all <- ggplot(results_4f, aes(idx, sign_logP, fill = Event)) +
+  geom_area(position = "identity", alpha = .75) +
+  geom_hline(yintercept = 0, linewidth = .25) +
+  geom_hline(yintercept = c(-sig_lines, sig_lines),
+             colour = "grey40", linetype = "dotted", linewidth = .25) +
+  geom_vline(xintercept = chr_last_idx + 0.5, colour = "black", linewidth = .3) +
+  geom_vline(xintercept = centromere_idx, colour = "grey30",
+             linewidth = .25, linetype = "dashed") +
+  scale_fill_manual(values = c(Gain = "#D64045", Loss = "#375E97")) +
+  scale_x_continuous(breaks = chr_mid_idx$idx, labels = chr_mid_idx$Chromosome,
+                     expand = c(0, 0)) +
+  facet_wrap(~CANCER_TYPE, ncol = 1, strip.position = "right", scales = "free_y") +
+  labs(title = "Signed -log10(padj) CNV Survival — 4 tumor types, aligned",
+       x = "chromosome", y = "signed -log10(padj)", fill = "Event") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(size = 6),
+        strip.text = element_text(face = "bold", size = 9),
+        plot.title = element_text(face = "bold", size = 12))
+
+ggsave(file.path(out_dir, "FourTumors_aligned_padj.pdf"),
+       p_all, width = 11, height = 9, useDingbats = FALSE)
+p_all
+
+results_4 %>% group_by(CANCER_TYPE) %>%
+  summarise(padj_lt_0.05 = sum(Padj < 0.05), padj_lt_0.2 = sum(Padj < 0.2),
+            max_abs_signlogP = round(max(abs(sign_logP)), 2), .groups = "drop")
+```
+```
+
