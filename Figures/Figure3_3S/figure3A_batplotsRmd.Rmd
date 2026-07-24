@@ -1,0 +1,218 @@
+```{r}
+###########################################################################
+###########################################################################
+###                                                                     ###
+###                              FIGURE 3 A                             ###
+###                                                                     ###
+###########################################################################
+###########################################################################
+tumor_group_map <- c(
+  "Gyn"="UCEC.MSI", "Gyn"="UCEC.MSS", "Gyn"="OV", 
+  "Squamous"="CESC","Squamous"="LUSC", "Squamous"="HNSC.HPVneg", "Squamous"="ESCA.SC","Squamous"="BLCA", 
+  "Adeno" = "BRCA.pos","Adeno" = "BRCA.neg","Adeno" = "PRAD","Adeno" = "LUAD","Adeno" = "LIHC",
+  "GI"="COADREAD.MSI", "GI"="COADREAD.MSS", "GI"="ESCA.AD", "GI"="STAD", "GI"="PAAD",
+  "Kidney"="KICH", "Kidney"="KIRC", "Kidney"="KIRP",
+  "NC-Derived"="GBM", "NC-Derived"="LGG", "NC-Derived"="SKCM", "NC-Derived"="UVM",
+  "Other" = "ACC","Other" = "MESO","Other"="PCPG", "Other"="SARC", "Other"="TGCT", "Other"="UCS"
+)
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+cnv_level <- c("arm", "cytoband")[1]
+
+##################################################
+## celltype mapping
+##################################################
+celltype_map <- c(
+  "CD8.positive..alpha.beta.T.cell" = "CD8+T",
+  "CD4.positive..alpha.beta.T.cell" = "CD4+T",
+  "B.cell" = "B cell",
+  "natural.killer.cell" = "NK cell",
+  "inflammatory.macrophage" = "anti-tumor macrophage",
+  "alternatively.activated.macrophage" = "pro-tumor macrophage",
+  "macrophage" = "not in group",
+  "myeloid.cell" = "Myeloid",
+  "T.cell" = "not in group",
+  "fibroblast" = "Fibroblast",
+  "endothelial.cell" = "Endothelial",
+  "neutrophil" = "Neutrophil",
+  "malignant.cell" = "not in group"
+)
+
+##################################################
+## settings
+##################################################
+legend_pos <- c(0.12, 0.95)
+
+##################################################
+## load data
+##################################################
+if (cnv_level == "arm") {
+  arm_hit <- read.csv(
+    "./input/xcell_cr_linear_regression_Outputs_ArmCNV.csv",
+    row.names = 1
+  )
+  arm_hit$Arm <- arm_hit$Cytoband
+}
+if (cnv_level == "cytoband") {
+  arm_hit <- read.csv(
+    "./input/xcell_cr_linear_regression_Outputs_CytoCNV.csv",
+    row.names = 1
+  )
+  arm_hit$Arm <- paste0("Arm", arm_hit$ChrArm)
+}
+
+##################################################
+## map celltypes
+##################################################
+arm_hit$CellType <- celltype_map[arm_hit$CellType]
+arm_hit <- arm_hit[arm_hit$CellType != "not in group", ]
+arm_hit$CellType <- factor(
+  arm_hit$CellType,
+  levels = c(
+    "CD8+T",
+    "CD4+T",
+    "B cell",
+    "NK cell",
+    "anti-tumor macrophage",
+    "pro-tumor macrophage",
+    "Myeloid",
+    "Neutrophil",
+    "Fibroblast",
+    "Endothelial"
+  )
+)
+
+##################################################
+## BH correction
+##################################################
+arm_hit <- arm_hit %>%
+  group_by(TumorType, CellType) %>%
+  mutate(BH = p.adjust(P_val, method = "BH")) %>%
+  ungroup()
+
+##################################################
+## annotations
+##################################################
+arm_hit$hit_value <- arm_hit$cnv_status * arm_hit$X.signedlog.P.adj.
+arm_hit$hit_group <- ifelse(arm_hit$hit_value > 0, "high", "low")
+arm_hit$EventType <- ifelse(arm_hit$cnv_status > 0, "Gain", "Loss")
+
+##################################################
+## tumor group
+##################################################
+arm_hit$tumor_group <- unlist(
+  sapply(arm_hit$TumorType, function(x) {
+    res <- names(tumor_group_map)[tumor_group_map == x]
+    if (length(res) == 0) {
+      res <- "not in group"
+    }
+    return(res)
+  })
+)
+
+arm_hit <- arm_hit[arm_hit$tumor_group != "not in group", ]
+arm_hit$tumor_group <- factor(arm_hit$tumor_group)
+
+##################################################
+## significance filter
+##################################################
+arm_hit <- arm_hit[arm_hit$BH < 0.2, ]
+
+
+##################################################
+## special subgrouping
+##################################################
+arm_hit$EventSub <- "Other"
+arm_hit$EventSub[
+  arm_hit$EventType == "Gain" &
+    arm_hit$Arm == "Arm1q"
+] <- "1q Gain"
+arm_hit$EventSub[
+  arm_hit$EventType == "Loss" &
+    arm_hit$Arm == "Arm9p"
+] <- "9p Loss"
+arm_hit$EventSub[
+  arm_hit$EventType == "Gain" &
+    arm_hit$EventSub == "Other"
+] <- "Other Gain"
+arm_hit$EventSub[
+  arm_hit$EventType == "Loss" &
+    arm_hit$EventSub == "Other"
+] <- "Other Loss"
+
+##################################################
+## summarize
+##################################################
+plot_df <- arm_hit %>%
+  dplyr::count(CellType, hit_group, EventType, EventSub)
+
+##################################################
+## x positions
+##################################################
+plot_df$hit_group <- factor(plot_df$hit_group, levels = c("low", "high"))
+plot_df$x_base <- as.numeric(plot_df$hit_group)
+plot_df$x_pos <- ifelse(
+  plot_df$EventType == "Gain",
+  plot_df$x_base - 0.22,
+  plot_df$x_base + 0.22
+)
+
+##################################################
+## plot
+##################################################
+p3a <- ggplot(
+  plot_df,
+  aes(x = x_pos, y = n, fill = EventType)
+) +
+  geom_col(
+    width = 0.38,
+    position = "stack",
+    alpha = 0.8
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 2),
+    labels = c("low", "high")
+  ) +
+  scale_fill_manual(
+    values = c(
+      #  "1q Gain"    = "#B00020",
+      #  "Other Gain" = "#F4A3A3",
+      #  "9p Loss"    = "#0B3D91",
+      #  "Other Loss" = "#AFC0F0"
+      "Gain" = "#ED1C24", "Loss" = "#384ca0"
+    )
+  ) +
+  theme_classic() +
+  facet_wrap(
+    . ~ CellType,
+    ncol = 13,
+    strip.position = "bottom",
+    labeller = label_wrap_gen(width = 10)
+  ) +
+  xlab("") +
+  ylab("Number of Arm SCNAs") +
+  theme(
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    axis.title.y = element_text(size = 18),
+    axis.text.x = element_text(size = 18),
+    strip.text = element_text(size = 20),
+    legend.position = legend_pos,
+    legend.text = element_text(size = 15),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 1)
+  )
+
+##################################################
+## save
+##################################################
+#pdf( "/Users/ze/Desktop/Ze_figure_github/figure3/figure3_A.pdf", height = 4, width = 30)
+print(p3a)
+#dev.off()
+```
+

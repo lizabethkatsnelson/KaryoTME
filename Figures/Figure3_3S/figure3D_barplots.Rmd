@@ -1,0 +1,273 @@
+```{r}
+
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+xcell = read.csv("./input/xcell_cr_linear_regression_Outputs_CytoCNV.csv",row.names = 1)
+pseudo = read.csv("./input/all_pseudobulk_cr_linear_regression_Outputs_CytoCNV.csv",row.names = 1)
+
+# ============================================================
+# SETTINGS
+# ============================================================
+TUMOR_TYPE       <- "LUAD"
+CD8_PATTERN      <- "CD8"
+OUT_DIR          <- "./"
+chr_line_size    <- 0.3
+center_line_size <- 0.15
+
+# ============================================================
+# STEP 1: Filter raw data and find common cytobands
+#   Do this BEFORE factoring so the shared levels are identical
+# ============================================================
+pseudo_raw <- pseudo %>%
+  filter(TumorType == TUMOR_TYPE,
+         grepl(CD8_PATTERN, CellType, ignore.case = TRUE))
+
+xcell_raw <- xcell %>%
+  filter(TumorType == TUMOR_TYPE,
+         grepl(CD8_PATTERN, CellType, ignore.case = TRUE))
+
+# common cytobands between the two datasets
+com_cyto <- intersect(pseudo_raw$Cytoband, xcell_raw$Cytoband)
+message(length(com_cyto), " common cytobands found.")
+
+# keep only common cytobands in both
+pseudo_raw <- pseudo_raw %>% filter(Cytoband %in% com_cyto)
+xcell_raw  <- xcell_raw  %>% filter(Cytoband %in% com_cyto)
+
+# ============================================================
+# STEP 2: prep_data — sort, compute signedlogP, factor
+#   shared_levels ensures identical Cytoband factor order
+# ============================================================
+prep_data <- function(df, shared_levels) {
+  df %>%
+    mutate(
+      chr_num   = case_when(
+        as.character(Chromosome) == "X" ~ 23L,
+        as.character(Chromosome) == "Y" ~ 24L,
+        TRUE ~ as.integer(as.character(Chromosome))
+      ),
+      arm_num   = ifelse(Arm == "p", 0L, 1L),
+      band_val  = as.numeric(
+        gsub("^[pq]", "", gsub("^[0-9XY]+", "", Cytoband))
+      ),
+      band_sort = ifelse(Arm == "p", -band_val, band_val)
+    ) %>%
+    arrange(chr_num, arm_num, band_sort) %>%
+    mutate(
+      signedlogP = X.signedlog.P.adj. * cnv_status,
+      cnv_status = ifelse(cnv_status > 0, "Gain", "Loss"),
+      Chromosome = factor(
+        gsub("Chr", "", as.character(Chromosome)),
+        levels = c(as.character(1:22), "X", "Y")
+      ),
+      ChrArm   = factor(ChrArm,   levels = unique(ChrArm)),
+      # use shared_levels so all three plots have identical x-axis
+      Cytoband = factor(Cytoband, levels = shared_levels)
+    )
+}
+
+# derive the canonical genomic order from pseudo (or xcell — same after filter)
+cyto_order <- pseudo_raw %>%
+  mutate(
+    chr_num   = case_when(
+      as.character(Chromosome) == "X" ~ 23L,
+      as.character(Chromosome) == "Y" ~ 24L,
+      TRUE ~ as.integer(as.character(Chromosome))
+    ),
+    arm_num   = ifelse(Arm == "p", 0L, 1L),
+    band_val  = as.numeric(
+      gsub("^[pq]", "", gsub("^[0-9XY]+", "", Cytoband))
+    ),
+    band_sort = ifelse(Arm == "p", -band_val, band_val)
+  ) %>%
+  arrange(chr_num, arm_num, band_sort) %>%
+  pull(Cytoband) %>%
+  as.character() %>%
+  unique()
+
+pseudo_df <- prep_data(pseudo_raw, cyto_order)
+xcell_df  <- prep_data(xcell_raw,  cyto_order)
+
+# ============================================================
+# STEP 3: Spot product  (pseudo × xcell, already aligned)
+# ============================================================
+spot_df <- pseudo_df %>%
+  dplyr::select(Cytoband, Chromosome, Arm, ChrArm,
+                chr_num, arm_num, band_sort,
+                signedlogP_pseudo = signedlogP) %>%
+  left_join(
+    xcell_df %>% dplyr::select(Cytoband, signedlogP_xcell = signedlogP),
+    by = "Cytoband"
+  ) %>%
+  mutate(
+    signedlogP = signedlogP_pseudo * signedlogP_xcell,
+    cnv_status = ifelse(signedlogP >= 0, "Gain", "Loss"),
+    Cytoband   = factor(Cytoband, levels = cyto_order)
+  )
+
+# ============================================================
+# STEP 4: Plot function  (Cytoband level only)
+# ============================================================
+plot_genome <- function(df,
+                        stat_col    = "signedlogP",
+                        signif      = 2,
+                        sec_signif  = 1,
+                        plottitle   = "",
+                        y_label = "Signed -log10(P.adj)", 
+                        color_gain  = "#ad0224",
+                        color_loss  = "#020dad",
+                        product_plot = F) {
+
+  df <- df[!is.na(df$Chromosome) & !is.na(df[[stat_col]]), ]
+
+  # chromosome boundary (last cytoband per chr)
+  chr.cut <- df %>%
+    group_by(Ref = Chromosome) %>%
+    summarise(vals = last(Cytoband), .groups = "drop") %>%
+    na.omit()
+
+  # centromere line (last cytoband of each p-arm)
+  arm.cut <- df %>%
+    group_by(Ref = ChrArm) %>%
+    summarise(vals = last(Cytoband), .groups = "drop") %>%
+    mutate(
+      vals = ifelse(grepl("q", Ref), NA, as.character(vals)),
+      Ref  = gsub("p|q", "", Ref)
+    ) %>%
+    filter(!duplicated(Ref), !is.na(vals))
+
+  # chromosome number label position (middle cytoband)
+  chr.mid <- df %>%
+    group_by(Ref = Chromosome) %>%
+    filter(row_number() == ceiling(n() / 2)) %>%
+    dplyr::select(Ref, vals = Cytoband)
+
+  ymax <- max(ceiling(max(abs(df[[stat_col]]), na.rm = TRUE)), 3)
+
+  x <- rlang::sym("Cytoband")
+  y <- rlang::sym(stat_col)
+
+  color_vals <- scales::alpha(
+    c("Gain" = color_gain, "Loss" = color_loss), 0.65
+  )
+
+  # zero-padding so geom_area renders both fill colours cleanly
+  df_pad  <- df %>%
+    mutate(!!stat_col := 0,
+           cnv_status = ifelse(cnv_status == "Gain", "Loss", "Gain"))
+  df_full <- bind_rows(df, df_pad)
+  
+  if(product_plot){
+    df_full$cnv_status = gsub("Gain","concordant",df_full$cnv_status)
+    df_full$cnv_status = gsub("Loss","discordant",df_full$cnv_status)
+    color_vals <- scales::alpha( 
+      c("concordant" = color_gain, "discordant" = color_loss), 0.65)
+   }
+  
+  ggplot(df_full) +
+    geom_area(aes(x = !!x, y = !!y,
+                  group = cnv_status, fill = cnv_status)) +
+    scale_fill_manual(values = color_vals) +
+    ylim(-ymax, ymax) +
+    labs(title = plottitle, y = y_label) +
+    theme_classic() +
+    theme(  
+            axis.title.x    = element_blank(),
+            axis.text.x     = element_blank(),
+            axis.ticks.x    = element_blank(),
+            legend.text =  element_text(size = 15),
+            legend.direction = "horizontal",  
+            legend.box ="vertical",
+            legend.title =  element_blank(),
+            axis.title.y =  element_text(size = 18.5),
+            axis.text.y  = element_text(size = 15,face = "bold"),
+            plot.title = element_text(size = 25,hjust = 0.5),
+            legend.position = c(0.90, 0.90)
+            ) +
+    geom_vline(xintercept = arm.cut$vals,
+               linetype = "dotted",   color = "#8F8F8F",
+               linewidth = center_line_size) +
+    geom_vline(xintercept = chr.cut$vals,
+               linetype = "longdash", color = "#8F8F8F",
+               linewidth = chr_line_size) +
+    geom_hline(yintercept = c(-signif,     signif),
+               linetype = "dashed", color = "black", linewidth = 0.3) +
+    geom_hline(yintercept = c(-sec_signif, sec_signif),
+               linetype = "dashed", color = "black", linewidth = 0.15) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.15) +
+    geom_text(data = chr.mid,
+              aes(x = vals, y = -ymax, label = Ref, hjust = 0, vjust = 0),
+              angle = 0, size = 6.5, inherit.aes = FALSE)
+}
+
+# ============================================================
+# STEP 5: Build panels and save
+# ============================================================
+p_pseudo <- plot_genome(
+  pseudo_df,
+  plottitle  = "pseudo bulk |  LUAD  |  CD8+T",
+ # color_gain = "#d4511a", color_loss = "#019050"
+  color_gain = "#be3a0e", color_loss = "#0184a0"
+)
+
+p_xcell <- plot_genome(
+  xcell_df,
+  plottitle  = "xcell  |  LUAD  |  CD8+T",
+  color_gain = "#ad0224", color_loss = "#020dad"
+)
+
+
+p_spot <- plot_genome(
+  spot_df,
+  plottitle  = "spot product (pseudo × xcell)  |  LUAD  |  CD8+T",
+  y_label = "product of Signed -log10(P.adj)",
+  color_gain = "grey30",   # concordant  → green
+  color_loss = "grey85",    # discordant  → red
+  product_plot = T
+)
+
+#pdf(file.path(OUT_DIR, "CD8_LUAD_cytoband.pdf"), height = 12, width = 29)
+print(p_pseudo / p_xcell / p_spot)
+#dev.off()
+
+#message("Done. PDF saved to ", OUT_DIR, "CD8_LUAD_cytoband.pdf")
+```
+
+```{r}
+permutation_test <- function(x, y, n = 1000, low_rvalue_cut = 0) {
+  set.seed(12345)
+  index <-  abs(y) > low_rvalue_cut
+  
+  x <- x[index]
+  y <- y[index]
+
+  statisc_fn <- function(x, y) cor(x, y,method = "spearman") #,use = "pairise.complete.obs")
+  statisc <- statisc_fn(x, y)
+
+  permutation_statisc <- numeric(n)
+  for (i in 1:n) {
+    permutation_statisc[i] <- statisc_fn(x, sample(y, length(y)))
+  }
+
+  p <- sum(statisc < permutation_statisc) / n
+
+  gg_df <- data.frame(statisc = permutation_statisc)
+  p1 <- ggplot(gg_df, aes(x = statisc)) +
+    geom_density() +
+    geom_vline(xintercept = statisc, color = "red", linetype = "dashed") +
+    theme_minimal() +
+    annotate("text", label = paste0("p value: ", round(p, 3)),
+             x = 0.8 * statisc, y = 15, size = 5) +
+    ggtitle(paste0("Pearson\n"))
+
+  return(list(plot = p1, statistic = statisc, p_value = p))
+}
+res <- permutation_test(x = pseudo_df$signedlogP, y= xcell_df$signedlogP, n = 1000,low_rvalue_cut = -log10(0.2)  )
+res$plot
+res$statistic
+res$p_value
+```
+

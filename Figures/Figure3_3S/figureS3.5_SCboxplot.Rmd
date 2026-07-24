@@ -1,0 +1,317 @@
+```{r}
+library(ggplot2)
+library(qs)
+library(Matrix.utils)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggpubr)
+
+denominator_type = c("all","not_tumor","immune_only")[[3]]
+
+############################################################################
+###                figure 3   Lung cancer DNA-cell violin plot           ###
+############################################################################
+m1_cell = readRDS("./input/m1_meta.rds")
+m1_cell$cell_id = gsub("^.*_Lung_","",rownames(m1_cell))
+m2_cell  = readRDS("./input/m2_meta.rds")
+m2_cell$cell_id = gsub("^.*_Lung_","",rownames(m2_cell))
+annotation = qread("./input/luad_annotation.qs")
+is_m1 <- annotation$cell %in% m1_cell$cell_id
+is_m2 <- annotation$cell %in% m2_cell$cell_id
+annotation$M_end <- ifelse(is_m1, "M1", annotation$unsup_level)
+annotation$M_end <- ifelse(is_m2, "M2", annotation$M_end)
+cell_ratio = table(annotation$sample, annotation$M_end)
+cell_ratio = matrix(cell_ratio, ncol = ncol(cell_ratio), dimnames = dimnames(cell_ratio))
+cell_ratio = as.data.frame(cell_ratio)
+
+if (denominator_type == "all") {
+  denominator_celltype = c("B_cell","CD4_T","CD8_T","cDC1","cDC2","DN_T","Endothelial","Epithelial","Fibroblast","Mast_cell","neu_macro_mono","NK","pDC","plasma_cell","Treg","unknown_cell","Malignant")
+}
+if (denominator_type == "not_tumor") {
+  denominator_celltype = c("B_cell","CD4_T","CD8_T","cDC1","cDC2","DN_T","Endothelial","Epithelial","Fibroblast","Mast_cell","neu_macro_mono","NK","pDC","plasma_cell","Treg","unknown_cell")
+}
+if (denominator_type == "immune_only") {
+  denominator_celltype = c("B_cell","CD4_T","CD8_T","cDC1","cDC2","DN_T","Mast_cell","neu_macro_mono","NK","pDC","plasma_cell","Treg")
+}
+cell_ratio = cell_ratio / apply(cell_ratio[, denominator_celltype], 1, sum)
+cell_ratio$cd8_NK = cell_ratio$CD8_T + cell_ratio$NK
+
+DNA      = qread("input/maligant_DNA.qs")
+gene_order = readRDS("input/human_gene_info.rds")
+gene_order$chr_arm = paste0(gene_order$chr, gene_order$cytoband)
+gene_order$chr_arm = gsub("\\..*$","", gene_order$chr_arm)
+rownames(gene_order) = gene_order$gene
+com_gene   = intersect(gene_order$gene, rownames(DNA))
+gene_order = gene_order[com_gene, ]
+DNA        = DNA[com_gene, ]
+DNA_arm    = aggregate.Matrix(DNA, groupings = gene_order$arm,     fun = "mean")
+DNA_arm    = t(as.data.frame(as.matrix(DNA_arm)))
+DNA        = aggregate.Matrix(DNA, groupings = gene_order$chr_arm, fun = "mean")
+DNA        = t(as.data.frame(as.matrix(DNA)))
+
+lung_cancer_summary = read.table("input/Lung_cancer_metadata_summary.txt",
+                                  fill = TRUE, sep = "\t", header = TRUE)
+lung_cancer_summary = lung_cancer_summary[lung_cancer_summary$cancer_type == "LUAD", ]
+luad_id    = lung_cancer_summary$sampleID
+cell_ratio = cell_ratio[luad_id, ]
+DNA        = DNA[luad_id, ]
+cell_ratio = cell_ratio[rownames(DNA), ]
+DNA_arm    = DNA_arm[luad_id, ]
+
+# ── density plot ──────────────────────────────────────────────────────────
+list_p_luad  = list()
+list_df_luad = list()
+
+gg_df = data.frame(chr9p = DNA_arm[,"9p"], chr1q = DNA_arm[,"1q"]) %>%
+  pivot_longer(cols = 1:2, names_to = "arm", values_to = "cnv")
+
+list_p_luad[["density"]] =
+  ggplot(gg_df, aes(x = cnv, fill = arm)) +
+  geom_density() +
+  facet_wrap(.~ arm, scales = "free") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 23),
+          axis.title  = element_text(size = 24),
+          plot.title  = element_text(size = 22, hjust = 0.5)) +
+  geom_vline(xintercept = 1.05, linetype = "dashed", color = "#EA6A6A", linewidth = 1.2) +
+  geom_vline(xintercept = 0.95, linetype = "dashed", color = "#4F6DB8", linewidth = 1.2)
+
+#arm_of_interest = c("chr1p22","chr1p21","chr1q21","chr1q22","chr1q23","chr1q24", "chr13q32","chr5q35","chr6p21","chr6p22","chr9p13","chr9p21","chr9p24")
+
+chr_arm =  unique(gene_order$chr_arm)
+arm_of_interest = chr_arm[c(grep("chr1q",chr_arm),grep("chr9p",chr_arm))]
+
+# ── shared helpers ────────────────────────────────────────────────────────
+filter_by_arm <- function(df, chr) {
+  if (length(grep("1p",  chr)) != 0) df = df[df$cnv_cate != "gain", ]
+  if (length(grep("1q",  chr)) != 0) df = df[df$cnv_cate != "loss", ]
+  if (length(grep("9p",  chr)) != 0) df = df[df$cnv_cate != "gain", ]
+  if (length(grep("13q", chr)) != 0) df = df[df$cnv_cate != "gain", ]
+  if (length(grep("5q",  chr)) != 0) df = df[df$cnv_cate != "gain", ]
+  if (length(grep("6p",  chr)) != 0) df = df[df$cnv_cate != "loss", ]
+  df
+}
+
+make_res <- function(formula, data) {
+  y_var = as.character(formula[[2]])
+  res   = compare_means(formula, data = data, method = "t.test")
+  rng   = range(data[[y_var]], na.rm = TRUE)
+  step  = 0.08 * diff(rng)
+  res %>% mutate(
+    p_one      = p / 2,
+    label      = sprintf("p = %.3g", p_one),
+    x          = 1.5,
+    y.position = rng[2] + row_number() * step
+  )
+}
+
+
+
+
+make_violin <- function(df, y_var, title_txt) {
+  res = make_res(as.formula(paste(y_var, "~ cnv_cate")), df)
+  ggplot(df, aes_string(x = "cnv_cate", y = y_var, fill = "cnv_cate")) +
+    geom_violin(trim = FALSE, alpha = 0.7) +
+    geom_boxplot(width = 0.20, fill = "white",
+             outlier.shape = NA, coef = 0) +
+    geom_jitter(width = 0.08, size = 1, alpha = 0.3) +   
+    stat_pvalue_manual(res, label = "label",
+                       xmin = "group1", xmax = "group2",
+                       y.position = "y.position", x = "x",
+                       remove.bracket = TRUE, inherit.aes = FALSE,
+                       size = 8, vjust = 0.9) +
+    scale_fill_manual(values = c("loss" = "#4F6DB8",
+                                 "neu"  = "#B8B8B8",
+                                 "gain" = "#EA6A6A")) +
+    labs(x = NULL, y = "proportion", title = title_txt) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.x      = element_text(size = 24),
+          axis.text.y      = element_text(size = 18),
+          axis.title      = element_text(size = 24),
+          plot.title      = element_text(size = 22, hjust = 0.5),
+          )
+}
+
+# ── LUAD CD8 ──────────────────────────────────────────────────────────────
+for (chr in arm_of_interest) {
+  gg_df = data.frame(cnv = DNA[, chr], proportion = cell_ratio$CD8_T)
+  gg_df$cnv_cate = cut(gg_df$cnv, c(-Inf, 0.95, 1.05, Inf), c("loss","neu","gain"))
+  gg_df = filter_by_arm(gg_df, chr)
+  gg_df$cytoband = chr
+  list_p_luad[[paste0("CD8", chr)]]  = make_violin(gg_df, "proportion",
+                                                    paste0("CD8+ T cell proportion\n", chr))
+  list_df_luad[[paste0("CD8", chr)]] = gg_df
+}
+
+# ── LUAD M1 ───────────────────────────────────────────────────────────────
+for (chr in arm_of_interest) {
+  gg_df = data.frame(cnv = DNA[, chr], proportion = cell_ratio$M1)
+  gg_df$cnv_cate = cut(gg_df$cnv, c(-Inf, 0.95, 1.05, Inf), c("loss","neu","gain"))
+  gg_df = filter_by_arm(gg_df, chr)
+  gg_df$cytoband = chr
+  list_p_luad[[paste0("M1_", chr)]]  = make_violin(gg_df, "proportion",
+                                                    paste0("M1 macrophage proportion\n", chr))
+  list_df_luad[[paste0("M1_", chr)]] = gg_df
+}
+
+# ── LUAD B cell ───────────────────────────────────────────────────────────
+for (chr in arm_of_interest) {
+  gg_df = data.frame(cnv = DNA[, chr], proportion = cell_ratio$B_cell)
+  gg_df$cnv_cate = cut(gg_df$cnv, c(-Inf, 0.95, 1.05, Inf), c("loss","neu","gain"))
+  gg_df = filter_by_arm(gg_df, chr)
+  gg_df$cytoband = chr
+  list_p_luad[[paste0("B cell", chr)]]  = make_violin(gg_df, "proportion",
+                                                       paste0("B cells proportion\n", chr))
+  list_df_luad[[paste0("B cell", chr)]] = gg_df
+}
+
+
+
+############################################################################
+###                   melanoma cancer DNA-cell violin plot               ###
+############################################################################
+list_p_skcm  = list()
+list_df_skcm = list()
+
+DNA_arm_skcm = read.csv("input/melenoma_Arm_CNV_IS_Associations.csv")
+DNA_arm_skcm = DNA_arm_skcm[grep("Macrophage", DNA_arm_skcm$cellofinterest), ]
+
+list_p_skcm[["density"]] =
+  ggplot(DNA_arm_skcm, aes(x = CNV, fill = arm)) +
+  geom_density() +
+  facet_wrap(.~ arm, scales = "free") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 23),
+          axis.title      = element_text(size = 24),
+          plot.title      = element_text(size = 22, hjust = 0.5)) +
+  geom_vline(xintercept = 1.07, linetype = "dashed", color = "#EA6A6A", linewidth = 1.2) +
+  geom_vline(xintercept = 0.96, linetype = "dashed", color = "#4F6DB8", linewidth = 1.2)
+
+arm_of_interest_skcm = c("chr1q22","chr1q41","chr1q43","chr1q44","chr9p23")
+
+
+# ── SKCM CD8 ──────────────────────────────────────────────────────────────
+for (chr in arm_of_interest_skcm) {
+  gg_df = read.csv("input/melenoma_Cytoband_CNV_IS_Associations.csv")
+  gg_df$arm = paste0("chr", gg_df$arm)
+  gg_df = gg_df[gg_df$cellofinterest == "Cytotoxic" & gg_df$arm == chr, ]
+  gg_df$cnv_cate = cut(gg_df$CNV, c(-Inf, 0.96, 1.07, Inf), c("loss","neu","gain"))
+  gg_df = filter_by_arm(gg_df, chr)
+  gg_df$cytoband = chr
+  list_p_skcm[[paste0("CD8_", chr)]]  = make_violin(gg_df, "score",
+                                                     paste0("CD8+ T cell proportion\n", chr))
+  list_df_skcm[[paste0("CD8_", chr)]] = gg_df
+}
+
+# ── SKCM macrophage ───────────────────────────────────────────────────────
+for (chr in arm_of_interest_skcm) {
+  gg_df = read.csv("input/melenoma_Cytoband_CNV_IS_Associations.csv")
+  gg_df$arm = paste0("chr", gg_df$arm)
+  gg_df = gg_df[gg_df$cellofinterest == "Macrophage" & gg_df$arm == chr, ]
+  gg_df$cnv_cate = cut(gg_df$CNV, c(-Inf, 0.96, 1.07, Inf), c("loss","neu","gain"))
+  gg_df = filter_by_arm(gg_df, chr)
+  gg_df$cytoband = chr
+  list_p_skcm[[paste0("macropahge_", chr)]]  = make_violin(gg_df, "score",
+                                                            paste0("macrophage cell proportion\n", chr))
+  list_df_skcm[[paste0("macropahge_", chr)]] = gg_df
+}
+
+
+
+############################################################################
+###                   PADC cancer DNA-cell violin plot                   ###
+############################################################################
+library(dplyr)
+list_p_padc  = list()
+list_df_padc = list()
+
+debbie_dna  = read.csv("input/1q_9p_gain_loss_neutral_persample.csv",
+                        row.names = 1, check.names = FALSE)
+debbie_cell = read.csv("input/xSpecific_CellType_by_Patient.csv",
+                        row.names = 1, check.names = FALSE)
+
+if (denominator_type == "all") {
+  denominator_celltype = c("B.Cell","CD4_T","CD8_T","DC","Endothelial_cells","Epithelial_cells","Fibroblast","Hepatocytes","M1","M2","Macrophage_Other","Malignant","Monocyte","Neurons","Neutrophils","NK.Cell","Smooth_muscle_cells","Tcell_Other")
+}
+if (denominator_type == "not_tumor") {
+  denominator_celltype = c("B.Cell","CD4_T","CD8_T","DC","Endothelial_cells","Epithelial_cells","Fibroblast","Hepatocytes","M1","M2","Macrophage_Other","Monocyte","Neurons","Neutrophils","NK.Cell","Smooth_muscle_cells","Tcell_Other")
+}
+if (denominator_type == "immune_only") {
+  denominator_celltype = c("B.Cell","CD4_T","CD8_T","DC","M1","M2","Macrophage_Other","Malignant","Monocyte","Neutrophils","NK.Cell","Tcell_Other")
+}
+debbie_cell = debbie_cell / apply(debbie_cell[, denominator_celltype], 1, sum)
+
+debbie_macro = debbie_cell %>%
+  dplyr::select(M1, M2) %>%
+  tibble::rownames_to_column("Sample") %>%
+  pivot_longer(cols = c(M1, M2), names_to = "CellType", values_to = "Proportion")
+
+debbie_T = debbie_cell %>%
+  dplyr::select(CD4_T, CD8_T) %>%
+  tibble::rownames_to_column("Sample") %>%
+  pivot_longer(cols = c(CD4_T, CD8_T), names_to = "CellType", values_to = "Proportion")
+
+# ── PADC M1 ───────────────────────────────────────────────────────────────
+for (chr in colnames(debbie_dna)) {
+  debbie_macro_sub = debbie_macro[debbie_macro$CellType == "M1", ]
+  rownames(debbie_macro_sub) = debbie_macro_sub$Sample
+  gg_df = debbie_macro_sub[rownames(debbie_dna), ]
+  gg_df$cnv_cate = debbie_dna[, chr]
+  gg_df = filter_by_arm(gg_df, chr)
+  list_p_padc[[paste0("macropahge_", chr)]]  = make_violin(gg_df, "Proportion",
+                                                           paste0("M1 macrophage proportion\n", chr))
+  list_df_padc[[paste0("macropahge_", chr)]] = gg_df
+}
+
+# ── PADC CD8 ──────────────────────────────────────────────────────────────
+for (chr in colnames(debbie_dna)) {
+  debbie_T_sub = debbie_T[debbie_T$CellType == "CD8_T", ]
+  rownames(debbie_T_sub) = debbie_T_sub$Sample
+  gg_df = debbie_T_sub[rownames(debbie_dna), ]
+  gg_df$cnv_cate = debbie_dna[, chr]
+  gg_df = filter_by_arm(gg_df, chr)
+  list_p_padc[[paste0("CD8_T", chr)]]  = make_violin(gg_df, "Proportion",
+                                                      paste0("CD8+ T cell proportion\n", chr)) 
+  list_df_padc[[paste0("CD8_T", chr)]] = gg_df
+}
+
+
+
+```
+
+
+```{r}
+############################################################################
+###                figure S3          ###
+############################################################################
+
+pdf("S3_5luad_violin_armlvl.pdf",
+    height = 6.5, width = 18.5)
+print(wrap_plots(list_p_luad[c("density","CD8chr1q23","CD8chr1q25","CD8chr9p24","M1_chr1q31","M1_chr9p13")], ncol = 3) +
+     #   plot_annotation(tag_levels = "A") &
+        theme(plot.tag = element_text(size = 30, face = "bold"),
+              plot.tag.position = c(0.01, 0.99)))
+dev.off()
+
+
+pdf("S3_5skcm_violin_armlvl.pdf",
+    height = 6.5, width = 18.5)
+print(wrap_plots(list_p_skcm[c("density","CD8_chr1q41","CD8_chr1q44","CD8_chr9p23")], ncol = 3) +
+     #   plot_annotation(tag_levels = "A") &
+        theme(plot.tag = element_text(size = 30, face = "bold"),
+              plot.tag.position = c(0.01, 0.99)))
+dev.off()
+
+
+
+pdf("S3_5padc_violin_armlvl.pdf",
+    height = 3.5, width = 18.5)
+print(wrap_plots(list_p_padc[c("macropahge_1q23","macropahge_1q25","CD8_T9p21")], ncol = 3) +
+     #   plot_annotation(tag_levels = "A") &
+        theme(plot.tag = element_text(size = 30, face = "bold"),
+              plot.tag.position = c(0.01, 0.99)))
+dev.off()
+```
+

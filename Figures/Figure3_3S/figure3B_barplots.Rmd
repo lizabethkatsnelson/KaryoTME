@@ -1,0 +1,370 @@
+
+```{r}
+###########################################################################
+###########################################################################
+###                                                                     ###
+###                           FIGURE 3B                                 ###
+###                                                                     ###
+###########################################################################
+###########################################################################
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+celltype_map <- c(
+  "CD8.positive..alpha.beta.T.cell" = "CD8+T",
+  "CD4.positive..alpha.beta.T.cell" = "CD4+T",
+  "B.cell" = "B cell",
+  "natural.killer.cell" = "NK cell",
+  "inflammatory.macrophage" = "anti-tumor macrophage",
+  "alternatively.activated.macrophage" = "pro-tumor macrophage",
+  "macrophage" = "not in group",
+  "myeloid.cell" = "Myeloid",
+  "T.cell" = "not in group",
+  "fibroblast" = "Fibroblast",
+  "endothelial.cell" = "Endothelial",
+  "neutrophil" = "Neutrophil",
+  "malignant.cell" = "not in group"
+)
+
+tumor_group_map <- c(
+  "Gyn" = "UCEC.MSI", "Gyn" = "UCEC.MSS", "Gyn" = "OV",
+  "Squamous" = "CESC", "Squamous" = "LUSC", "Squamous" = "HNSC.HPVneg", "Squamous" = "ESCA.SC", "Squamous" = "BLCA",
+  "Adeno" = "BRCA.pos", "Adeno" = "BRCA.neg", "Adeno" = "PRAD", "Adeno" = "LUAD", "Adeno" = "LIHC",
+  "GI" = "COADREAD.MSI", "GI" = "COADREAD.MSS", "GI" = "ESCA.AD", "GI" = "STAD", "GI" = "PAAD",
+  "Kidney" = "KICH", "Kidney" = "KIRC", "Kidney" = "KIRP",
+  "NC-Derived" = "GBM", "NC-Derived" = "LGG", "NC-Derived" = "SKCM", "NC-Derived" = "UVM",
+  "Other" = "ACC", "Other" = "MESO", "Other" = "PCPG", "Other" = "SARC", "Other" = "TGCT", "Other" = "UCS"
+)
+
+##################################################
+## load & preprocess (done once)
+##################################################
+arm_hit <- read.csv( "./input/xcell_cr_linear_regression_Outputs_ArmCNV.csv", row.names = 1)
+arm_hit$Arm <- arm_hit$Cytoband
+arm_hit$CellType <- celltype_map[arm_hit$CellType]
+arm_hit <- arm_hit[arm_hit$CellType != "not in group", ]
+arm_hit$CellType <- factor(
+  arm_hit$CellType,
+  levels = c(
+    "CD8+T", "CD4+T", "B cell", "NK cell",
+    "anti-tumor macrophage", "pro-tumor macrophage",
+    "Myeloid", "Neutrophil", "Fibroblast", "Endothelial"
+  )
+)
+arm_hit <- arm_hit %>%
+  group_by(TumorType, CellType) %>%
+  mutate(BH = p.adjust(P_val, method = "BH")) %>%
+  ungroup()
+arm_hit$hit_value <- arm_hit$cnv_status * arm_hit$X.signedlog.P.adj.
+arm_hit$hit_group <- ifelse(arm_hit$hit_value > 0, "high", "low")
+arm_hit$EventType <- factor(
+  ifelse(arm_hit$cnv_status > 0, "Gain", "Loss"),
+  levels = c("Gain", "Loss")
+)
+arm_hit <- arm_hit[arm_hit$BH < 0.2, ]
+arm_hit$tumor_group <- unlist(
+  sapply(arm_hit$TumorType, function(x) {
+    res <- names(tumor_group_map)[tumor_group_map == x]
+    if (length(res) == 0) res <- "not in group"
+    return(res)
+  })
+)
+arm_hit <- arm_hit[arm_hit$tumor_group != "not in group", ]
+
+##################################################
+## shared plot settings
+##################################################
+event_colors <- c("Gain" = "#B00020", "Loss" = "#0B3D91")
+event_colors <- c("Gain" = "#ED1C24", "Loss" = "#384ca0")
+
+shared_theme <- theme_classic() +
+  theme(
+    legend.direction   = "horizontal",
+    legend.box         = "vertical",
+    legend.title       = element_blank(),
+    axis.title.y       = element_text(size = 18),
+    axis.text.x        = element_text(size = 18),
+    axis.text.y        = element_text(size = 14),
+    strip.text         = element_text(size = 20),
+    legend.text        = element_text(size = 15),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 1),
+    plot.title         = element_text(size = 16, hjust = 0.5, face = "bold")
+  )
+
+make_panel <- function(df, title, y_max, show_y = TRUE) {
+  p <- ggplot(df, aes(x = EventType, y = n, fill = EventType)) +
+    geom_col(width = 0.55, position = "stack", alpha = 0.8) +
+    scale_fill_manual(values = event_colors, drop = FALSE) +
+    scale_x_discrete(drop = FALSE) + # keep empty factor levels
+    coord_cartesian(ylim = c(0, y_max)) + # shared y scale
+    ggtitle(title) +
+    xlab("") +
+    shared_theme
+  if (show_y) p <- p + ylab("Number of Arm SCNAs") else p <- p + ylab("")
+  p
+}
+
+##################################################
+## iterations: All tumors + GI subset
+##################################################
+runs <- list(
+  list(label = "All", data = arm_hit, suffix = ""),
+  list(label = "GI", data = arm_hit[arm_hit$tumor_group == "GI", ], suffix = "_GI")
+)
+
+for (run in runs) {
+  dat <- run$data
+
+  left_df <- dat %>%
+    filter(CellType %in% c("CD8+T", "CD4+T", "NK cell"), hit_group == "low") %>%
+    dplyr::count(EventType)
+  mid_df <- dat %>%
+    filter(CellType == "anti-tumor macrophage", hit_group == "low") %>%
+    dplyr::count(EventType)
+  right_df <- dat %>%
+    filter(CellType == "pro-tumor macrophage", hit_group == "high") %>%
+    dplyr::count(EventType)
+
+  # shared y ceiling across all three panels
+  y_max <- max(c(left_df$n, mid_df$n, right_df$n), na.rm = TRUE) * 1.05
+
+  p_left  <- make_panel(left_df,  "TME Cold - Lymphoid\nCD8+T / CD4+T / NK cell (Low)", y_max, show_y = TRUE)
+  p_mid   <- make_panel(mid_df,   "TME Cold - Myeloid\nAnti-tumor Macrophage (Low)",    y_max, show_y = FALSE)
+  p_right <- make_panel(right_df, "TME Cold - Myeloid\nPro-tumor Macrophage (High)",    y_max, show_y = FALSE)
+
+  combined <- p_left + p_mid + p_right +
+    plot_layout(guides = "collect", widths = c(1.2, 1, 1)) &
+    theme(legend.position = "bottom")
+
+  print(combined)
+}
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+celltype_map <- c(
+  "CD8.positive..alpha.beta.T.cell" = "CD8+T",
+  "CD4.positive..alpha.beta.T.cell" = "CD4+T",
+  "B.cell" = "B cell",
+  "natural.killer.cell" = "NK cell",
+  "inflammatory.macrophage" = "anti-tumor macrophage",
+  "alternatively.activated.macrophage" = "pro-tumor macrophage",
+  "macrophage" = "not in group",
+  "myeloid.cell" = "Myeloid",
+  "T.cell" = "not in group",
+  "fibroblast" = "Fibroblast",
+  "endothelial.cell" = "Endothelial",
+  "neutrophil" = "Neutrophil",
+  "malignant.cell" = "not in group"
+)
+
+tumor_group_map <- c(
+  "Gyn"="UCEC.MSI", "Gyn"="UCEC.MSS", "Gyn"="OV",
+  "Squamous"="CESC","Squamous"="LUSC", "Squamous"="HNSC.HPVneg", "Squamous"="ESCA.SC","Squamous"="BLCA",
+  "Adeno" = "BRCA.pos","Adeno" = "BRCA.neg","Adeno" = "PRAD","Adeno" = "LUAD","Adeno" = "LIHC",
+  "GI"="COADREAD.MSI", "GI"="COADREAD.MSS", "GI"="ESCA.AD", "GI"="STAD", "GI"="PAAD",
+  "Kidney"="KICH", "Kidney"="KIRC", "Kidney"="KIRP",
+  "NC-Derived"="GBM", "NC-Derived"="LGG", "NC-Derived"="SKCM", "NC-Derived"="UVM",
+  "Other" = "ACC","Other" = "MESO","Other"="PCPG", "Other"="SARC", "Other"="TGCT", "Other"="UCS"
+)
+
+##################################################
+## load & preprocess
+##################################################
+arm_hit <- read.csv(
+  "/Users/ze/Desktop/Ze_figure_github/input/xcell_cr_linear_regression_Outputs_ArmCNV.csv",
+  row.names = 1
+)
+arm_hit$Arm <- arm_hit$Cytoband
+
+cyto_hit <- read.csv(
+  "/Users/ze/Desktop/Ze_figure_github/input/xcell_cr_linear_regression_Outputs_CytoCNV.csv",
+  row.names = 1
+)
+cyto_hit$Arm <- paste0("Arm", cyto_hit$ChrArm)
+
+preprocess <- function(df) {
+  df$CellType <- celltype_map[df$CellType]
+  df <- df[!is.na(df$CellType) & df$CellType != "not in group", ]
+  df$CellType <- factor(df$CellType, levels = c(
+    "CD8+T", "CD4+T", "B cell", "NK cell",
+    "anti-tumor macrophage", "pro-tumor macrophage",
+    "Myeloid", "Neutrophil", "Fibroblast", "Endothelial"
+  ))
+  df <- df %>%
+    group_by(TumorType, CellType) %>%
+    mutate(BH = p.adjust(P_val, method = "BH")) %>%
+    ungroup()
+  df$hit_value <- df$cnv_status * df$X.signedlog.P.adj.
+  df$hit_group <- ifelse(df$hit_value > 0, "high", "low")
+  df$EventType <- factor(
+    ifelse(df$cnv_status > 0, "Gain", "Loss"),
+    levels = c("Gain", "Loss")
+  )
+  df <- df[df$BH < 0.2, ]
+  df$tumor_group <- unlist(
+    sapply(df$TumorType, function(x) {
+      res <- names(tumor_group_map)[tumor_group_map == x]
+      if (length(res) == 0) res <- "not in group"
+      return(res)
+    })
+  )
+  df <- df[df$tumor_group != "not in group", ]
+  return(df)
+}
+
+arm_hit  <- preprocess(arm_hit)
+cyto_hit <- preprocess(cyto_hit)
+
+##################################################
+## colors & theme
+##################################################
+event_colors <- c("1q Gain" = "#B00020", "9p Loss" = "#0B3D91")
+
+shared_theme <- theme_classic() +
+  theme(
+    legend.direction    = "horizontal",
+    legend.title        = element_blank(),
+    axis.title.y        = element_text(size = 22),
+    axis.text.x         = element_text(size = 20, angle = 45, hjust = 1),
+    axis.text.y         = element_text(size = 20),
+    legend.text         = element_text(size = 20),
+    strip.text          = element_text(size = 20, face = "bold"),
+    panel.grid.minor    = element_blank(),
+    panel.grid.major.x  = element_blank(),
+    panel.grid.major.y  = element_line(linewidth = 1),
+    plot.title          = element_text(size = 22, hjust = 0.5, face = "bold"),
+    legend.position     = "bottom"
+  )
+
+# complete counts helper: ensures ALL CellGroups x EventLabels always present
+complete_counts <- function(df) {
+  all_combos <- expand.grid(
+    CellGroup  = factor(c("Low Lymphoid", "Low Anti-tumor Macrophage"),
+                        levels = c("Low Lymphoid", "Low Anti-tumor Macrophage")),
+    EventLabel = factor(c("1q Gain", "9p Loss"), levels = c("1q Gain", "9p Loss")),
+    stringsAsFactors = FALSE
+  )
+  all_combos %>%
+    left_join(df, by = c("CellGroup", "EventLabel")) %>%
+    mutate(n = ifelse(is.na(n), 0L, n))
+}
+
+##################################################
+## faceted panel builders
+##################################################
+
+# arm-level: facet by cell group, shared y scale
+make_arm_facet <- function(arm_data, title = "Arm level") {
+  df <- bind_rows(
+    arm_data %>%
+      filter(CellType %in% c("CD8+T", "CD4+T", "NK cell"), hit_group == "low") %>%
+      filter((Arm == "Arm1q" & EventType == "Gain") | (Arm == "Arm9p" & EventType == "Loss")) %>%
+      mutate(EventLabel = factor(ifelse(Arm == "Arm1q", "1q Gain", "9p Loss"),
+                                 levels = c("1q Gain", "9p Loss")),
+             CellGroup = "Low Lymphoid"),
+    arm_data %>%
+      filter(CellType == "anti-tumor macrophage", hit_group == "low") %>%
+      filter((Arm == "Arm1q" & EventType == "Gain") | (Arm == "Arm9p" & EventType == "Loss")) %>%
+      mutate(EventLabel = factor(ifelse(Arm == "Arm1q", "1q Gain", "9p Loss"),
+                                 levels = c("1q Gain", "9p Loss")),
+             CellGroup = "Low Anti-tumor Macrophage")
+  )
+
+  counts <- if (nrow(df) > 0) dplyr::count(df, CellGroup, EventLabel) else data.frame()
+  df <- complete_counts(counts)
+
+  ggplot(df, aes(x = EventLabel, y = n, fill = EventLabel)) +
+    geom_col(width = 0.55) +
+    scale_fill_manual(values = event_colors, drop = FALSE) +
+    scale_x_discrete(drop = FALSE) +
+    facet_wrap(~ CellGroup, ncol = 2, scales = "fixed") +
+    ggtitle(title) +
+    xlab("") + ylab("Number of significant SCNAs") +
+    shared_theme
+}
+
+# cytoband-level: facet by cell group, shared y scale
+make_cyto_facet <- function(cyto_data, title = "Cytoband level") {
+  df <- bind_rows(
+    cyto_data %>%
+      filter(CellType %in% c("CD8+T", "CD4+T", "NK cell"), hit_group == "low") %>%
+      filter((ChrArm == "1q" & EventType == "Gain") | (ChrArm == "9p" & EventType == "Loss")) %>%
+      mutate(EventLabel = factor(ifelse(ChrArm == "1q", "1q Gain", "9p Loss"),
+                                 levels = c("1q Gain", "9p Loss")),
+             CellGroup = "Low Lymphoid"),
+    cyto_data %>%
+      filter(CellType == "anti-tumor macrophage", hit_group == "low") %>%
+      filter((ChrArm == "1q" & EventType == "Gain") | (ChrArm == "9p" & EventType == "Loss")) %>%
+      mutate(EventLabel = factor(ifelse(ChrArm == "1q", "1q Gain", "9p Loss"),
+                                 levels = c("1q Gain", "9p Loss")),
+             CellGroup = "Low Anti-tumor Macrophage")
+  )
+
+  counts <- if (nrow(df) > 0) dplyr::count(df, CellGroup, EventLabel) else data.frame()
+  df <- complete_counts(counts)
+
+  ggplot(df, aes(x = EventLabel, y = n, fill = EventLabel)) +
+    geom_col(width = 0.55) +
+    scale_fill_manual(values = event_colors, drop = FALSE) +
+    scale_x_discrete(drop = FALSE) +
+    facet_wrap(~ CellGroup, ncol = 2, scales = "fixed") +
+    ggtitle(title) +
+    xlab("") + ylab("") +
+    shared_theme
+}
+
+##################################################
+## make one row per tumor group
+##################################################
+make_row <- function(arm_data, cyto_data, tg_label) {
+  p_arm  <- make_arm_facet( arm_data,  "Arm level")
+  p_cyto <- make_cyto_facet(cyto_data, "Cytoband level")
+
+  row <- p_arm + p_cyto +
+    plot_layout(guides = "collect", widths = c(1, 1)) &
+    theme(legend.position = "bottom")
+
+  row_annotated <- row +
+    plot_annotation(
+      title = tg_label,
+      theme = theme(plot.title = element_text(size = 24, face = "bold", hjust = 0.5))
+    )
+  wrap_elements(full = patchworkGrob(row_annotated))
+}
+
+##################################################
+## loop over tumor groups
+##################################################
+tumor_subsets <- c("All", "Squamous", "Adeno", "NC-Derived")
+
+row_list <- list()
+for (tg in tumor_subsets) {
+  if (tg == "All") {
+    arm_sub  <- arm_hit
+    cyto_sub <- cyto_hit
+  } else {
+    arm_sub  <- arm_hit  %>% filter(tumor_group == tg)
+    cyto_sub <- cyto_hit %>% filter(tumor_group == tg)
+  }
+  row_list[[tg]] <- make_row(arm_sub, cyto_sub, tg)
+}
+
+##################################################
+## stack rows & save
+##################################################
+combined <- wrap_plots(row_list, ncol = 1)
+
+print(combined)
+```
+
+
+

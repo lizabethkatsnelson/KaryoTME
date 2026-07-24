@@ -1,0 +1,352 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+```
+
+```{r}
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation")
+
+cnv <- read.csv("CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", check.names = FALSE)
+colnames(cnv)[1] <- "Sample"
+cat("Tumor types in CNV:", unique(cnv$TumorType), "\n")
+cat("Arm columns available:", grep("^Arm_", colnames(cnv), value = TRUE), "\n")
+
+
+```
+
+```{r}
+# Helper function to load one xCell file 
+load_xcell <- function(tumor_name, filename) {
+  raw <- read.delim(filename, header = TRUE, check.names = FALSE)
+  df  <- as.data.frame(t(raw[,-1]))
+  colnames(df)  <- raw$idx
+  df$Sample     <- rownames(df)
+  df$TumorType  <- tumor_name
+  rownames(df)  <- NULL
+  return(df)
+}
+
+# Load all tumor type xCel files 
+xcell_all <- bind_rows(
+  load_xcell("LUAD",  "xCell/LUAD_RNAseq_xCell_Tumor.cct"),
+  load_xcell("HNSCC", "xCell/HNSCC_RNAseq_xCell_Tumor.cct"),
+  #load_xcell("BLCA",  "xCell/BLCA_RNAseq_xCell_Tumor.cct"),
+  load_xcell("PDA",  "xCell/PDA_RNAseq_xCell_Tumor.cct"),
+  load_xcell("CO",  "xCell/CO_RNAseq_xCell_Tumor.cct"),
+  #load_xcell("LGG",   "xCell/LGG_RNAseq_xCell_Tumor.cct"),
+  #load_xcell("UVM",   "xCell/UVM_RNAseq_xCell_Tumor.cct"),
+  load_xcell("BR",  "xCell/BR_RNAseq_xCell_Tumor.cct"),
+  #load_xcell("LIHC",  "xCell/LIHC_RNAseq_xCell_Tumor.cct")
+)
+```
+
+```{r}
+# ─Check tumor type name alignment before merging ───────────────────
+cat("CNV tumor types:", unique(cnv$TumorType), "\n")
+cat("xCell tumor types:", unique(xcell_all$TumorType), "\n")
+cat("Arm columns:", grep("^Arm_", colnames(cnv), value = TRUE), "\n")
+```
+```{r}
+# Merge CNV + xCell 
+merged_all <- left_join(cnv, xcell_all, by = c("Sample", "TumorType"))
+cat("Merged rows:", nrow(merged_all), "\n")
+cat("Merged tumor types:", unique(merged_all$TumorType), "\n")
+```
+
+```{r}
+# xCell column name mapping
+celltype_map <- c(
+  "CD8+ T cells"       = "T cell CD8+",
+  "NK cells"           = "NK cell",
+  "M1 macrophages"     = "Macrophage M1",
+  "M2 macrophages"     = "Macrophage M2",
+  "Fibroblasts"        = "Cancer associated fibroblast",
+  "Endothelial cells"  = "Endothelial cell"
+)
+```
+
+# Tier 1 
+
+```{r}
+# Tier 1 targets — only available tumor types
+# BLCA, LGG, UVM not available in CPTAC
+targets <- tribble(
+  ~TumorType, ~Arm,      ~CNV_type, ~CellType,
+  # 9q loss
+  "LUAD",     "Arm_9q",  "Loss",    "CD8+ T cells",
+  "LUAD",     "Arm_9q",  "Loss",    "NK cells",
+  "LUAD",     "Arm_9q",  "Loss",    "M1 macrophages",
+  "PDA",      "Arm_9q",  "Loss",    "CD8+ T cells",
+  "HNSCC",    "Arm_9q",  "Loss",    "Fibroblasts",
+  # 18q loss
+  "CO",       "Arm_18q", "Loss",    "CD8+ T cells",
+  "CO",       "Arm_18q", "Loss",    "Fibroblasts",
+  "HNSCC",    "Arm_18q", "Loss",    "CD8+ T cells",
+  "HNSCC",    "Arm_18q", "Loss",    "Fibroblasts",
+  "HNSCC",    "Arm_18q", "Loss",    "Endothelial cells",
+  "PDA",      "Arm_18q", "Loss",    "CD8+ T cells",
+  "PDA",      "Arm_18q", "Loss",    "M1 macrophages",
+  "BR",       "Arm_18q", "Loss",    "Fibroblasts",
+  "BR",       "Arm_18q", "Loss",    "M2 macrophages",
+  # 1p loss
+  "PDA",      "Arm_1p",  "Loss",    "M1 macrophages",
+  "PDA",      "Arm_1p",  "Loss",    "Fibroblasts",
+  "PDA",      "Arm_1p",  "Loss",    "Endothelial cells"
+)
+
+# Colors
+cnv_colors_loss <- c("Loss" = "#4575b4", "Neutral" = "grey70")
+cnv_colors_gain <- c("Gain" = "#D64045", "Neutral" = "grey70")
+```
+
+p-value determined by wilcox test 
+2 sided by default 
+
+```{r}
+# Plot 
+# dir.create("boxplots_tier1", showWarnings = FALSE)
+
+for (i in 1:nrow(targets)) {
+  tumor    <- targets$TumorType[i]
+  arm_col  <- targets$Arm[i]
+  cnvtype  <- targets$CNV_type[i]
+  ct_label <- targets$CellType[i]
+  ct_col   <- celltype_map[ct_label]
+  arm_name <- gsub("Arm_", "", arm_col)
+
+  # Filter to tumor type
+  df_tumor <- merged_all %>% filter(TumorType == tumor)
+
+  # Skip if arm or cell type column not found
+  if (!arm_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — arm not found:", arm_col, "in", tumor)); next
+  }
+  if (!ct_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — cell type not found:", ct_col, "in", tumor)); next
+  }
+
+  # Classify CNV status
+  if (cnvtype == "Loss") {
+    df_tumor <- df_tumor %>%
+      mutate(CNV_status = case_when(
+        .data[[arm_col]] < -0.2 ~ "Loss",
+        .data[[arm_col]] >= -0.2 & .data[[arm_col]] <= 0.2 ~ "Neutral",
+        TRUE ~ NA_character_
+      )) %>%
+      filter(CNV_status %in% c("Loss", "Neutral"))
+    colors <- cnv_colors_loss
+  } else {
+    df_tumor <- df_tumor %>%
+      mutate(CNV_status = case_when(
+        .data[[arm_col]] > 0.2 ~ "Gain",
+        .data[[arm_col]] >= -0.2 & .data[[arm_col]] <= 0.2 ~ "Neutral",
+        TRUE ~ NA_character_
+      )) %>%
+      filter(CNV_status %in% c("Gain", "Neutral"))
+    colors <- cnv_colors_gain
+  }
+
+  # Skip if only one group
+  if (length(unique(df_tumor$CNV_status)) < 2) {
+    message(paste("Skipping — only one CNV group:", tumor, arm_col)); next
+  }
+
+  # Plot
+  p <- ggplot(df_tumor,
+              aes(x = CNV_status, y = .data[[ct_col]], fill = CNV_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    stat_summary(
+      fun.data = mean_se,
+      geom = "errorbar",
+      width = 0.2,
+      linewidth = 0.8,
+      color = "black"
+    ) +
+    stat_summary(
+      fun = mean,
+      geom = "point",
+      size = 2,
+      color = "black"
+    ) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", size = 4) +
+    scale_fill_manual(values = colors) +
+    labs(
+      title = paste0(tumor, "\n", ct_label, " by ", arm_name, " ", cnvtype),
+      x     = paste0(arm_name, " SCNA Status"),
+      y     = paste0(ct_label, " Score"),
+      fill  = "SCNA Status"
+    ) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 11))
+
+  # Save
+  filename <- paste0("boxplots_tier1/",
+                     tumor, "_", arm_name, "_", cnvtype, "_",
+                     gsub("[^A-Za-z0-9]", "_", ct_label), ".pdf")
+  ggsave(filename, plot = p, width = 4, height = 5)
+  message(paste("Saved:", filename))
+```
+
+# Tier 2
+```{r}
+# Tier 2 targets  
+targets_tier2 <- tribble(
+  ~TumorType, ~Arm,      ~CNV_type, ~CellType,
+  # 1q gain
+  "LUAD",     "Arm_1q",  "Gain",    "M1 macrophages",
+  "LUAD",     "Arm_1q",  "Gain",    "M2 macrophages",
+  "LUAD",     "Arm_1q",  "Gain",    "Total macrophages",
+  "BR",       "Arm_1q",  "Gain",    "M1 macrophages",
+  "BR",       "Arm_1q",  "Gain",    "Total macrophages",
+  "BR",       "Arm_1q",  "Gain",    "CD8+ T cells",
+  "PDA",      "Arm_1q",  "Gain",    "M2 macrophages",
+  "PDA",      "Arm_1q",  "Gain",    "Endothelial cells",
+  # 6p gain — LIHC not available
+  "LUAD",     "Arm_6p",  "Gain",    "M1 macrophages",
+  # 17q gain — LIHC not available
+  "BR",       "Arm_17q", "Gain",    "CD8+ T cells"
+)
+```
+
+```{r}
+# Tier 2 plot loop  
+dir.create("boxplots_tier2", showWarnings = FALSE)
+
+for (i in 1:nrow(targets_tier2)) {
+  tumor    <- targets_tier2$TumorType[i]
+  arm_col  <- targets_tier2$Arm[i]
+  cnvtype  <- targets_tier2$CNV_type[i]
+  ct_label <- targets_tier2$CellType[i]
+  ct_col   <- celltype_map[ct_label]
+  arm_name <- gsub("Arm_", "", arm_col)
+
+  df_tumor <- merged_all %>% filter(TumorType == tumor)
+
+  if (!arm_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — arm not found:", arm_col, "in", tumor)); next
+  }
+  if (!ct_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — cell type not found:", ct_col, "in", tumor)); next
+  }
+
+  df_tumor <- df_tumor %>%
+    mutate(CNV_status = case_when(
+      .data[[arm_col]] > 0.2  ~ "Gain",
+      .data[[arm_col]] >= -0.2 & .data[[arm_col]] <= 0.2 ~ "Neutral",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(CNV_status %in% c("Gain", "Neutral"))
+
+  if (length(unique(df_tumor$CNV_status)) < 2) {
+    message(paste("Skipping — only one CNV group:", tumor, arm_col)); next
+  }
+
+  p <- ggplot(df_tumor,
+              aes(x = CNV_status, y = .data[[ct_col]], fill = CNV_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", size = 4) +
+    scale_fill_manual(values = cnv_colors_gain) +
+    labs(
+      title = paste0(tumor, "\n", ct_label, " by ", arm_name, " ", cnvtype),
+      x     = paste0(arm_name, " SCNA Status"),
+      y     = paste0(ct_label, " Score"),
+      fill  = "SCNA Status"
+    ) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 11))
+
+  filename <- paste0("boxplots_tier2/",
+                     tumor, "_", arm_name, "_", cnvtype, "_",
+                     gsub("[^A-Za-z0-9]", "_", ct_label), ".pdf")
+  ggsave(filename, plot = p, width = 4, height = 5)
+  message(paste("Saved:", filename))
+}
+```
+
+# Tier 3
+```{r}
+# targets  
+# LGG not available in CPTAC — skipped
+targets_tier3 <- tribble(
+  ~TumorType, ~Arm,      ~CNV_type, ~CellType,
+  # 20p gain
+  "BR",       "Arm_20p", "Gain",    "M2 macrophages",
+  "PDA",      "Arm_20p", "Gain",    "M2 macrophages",
+  "PDA",      "Arm_20p", "Gain",    "Endothelial cells",
+  # 7p gain
+  "LUAD",     "Arm_7p",  "Gain",    "M2 macrophages",
+  "LUAD",     "Arm_7p",  "Gain",    "Fibroblasts",
+  "LUAD",     "Arm_7p",  "Gain",    "Endothelial cells",
+  "HNSCC",    "Arm_7p",  "Gain",    "Fibroblasts",
+  "PDA",      "Arm_7p",  "Gain",    "M2 macrophages",
+  "PDA",      "Arm_7p",  "Gain",    "Endothelial cells"
+)
+```
+
+```{r}
+# Tier 3 plots 
+dir.create("boxplots_tier3", showWarnings = FALSE)
+
+for (i in 1:nrow(targets_tier3)) {
+  tumor    <- targets_tier3$TumorType[i]
+  arm_col  <- targets_tier3$Arm[i]
+  cnvtype  <- targets_tier3$CNV_type[i]
+  ct_label <- targets_tier3$CellType[i]
+  ct_col   <- celltype_map[ct_label]
+  arm_name <- gsub("Arm_", "", arm_col)
+
+  df_tumor <- merged_all %>% filter(TumorType == tumor)
+
+  if (!arm_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — arm not found:", arm_col, "in", tumor)); next
+  }
+  if (!ct_col %in% colnames(df_tumor)) {
+    message(paste("Skipping — cell type not found:", ct_col, "in", tumor)); next
+  }
+
+  df_tumor <- df_tumor %>%
+    mutate(CNV_status = case_when(
+      .data[[arm_col]] > 0.2  ~ "Gain",
+      .data[[arm_col]] >= -0.2 & .data[[arm_col]] <= 0.2 ~ "Neutral",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(CNV_status %in% c("Gain", "Neutral"))
+
+  if (length(unique(df_tumor$CNV_status)) < 2) {
+    message(paste("Skipping — only one CNV group:", tumor, arm_col)); next
+  }
+
+  p <- ggplot(df_tumor,
+              aes(x = CNV_status, y = .data[[ct_col]], fill = CNV_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", size = 4) +
+    scale_fill_manual(values = cnv_colors_gain) +
+    labs(
+      title = paste0(tumor, "\n", ct_label, " by ", arm_name, " ", cnvtype),
+      x     = paste0(arm_name, " SCNA Status"),
+      y     = paste0(ct_label, " Score"),
+      fill  = "SCNA Status"
+    ) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 11))
+
+  filename <- paste0("boxplots_tier3/",
+                     tumor, "_", arm_name, "_", cnvtype, "_",
+                     gsub("[^A-Za-z0-9]", "_", ct_label), ".pdf")
+  ggsave(filename, plot = p, width = 4, height = 5)
+  message(paste("Saved:", filename))
+}
+```
+

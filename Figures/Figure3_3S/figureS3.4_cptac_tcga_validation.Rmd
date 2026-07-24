@@ -1,0 +1,1282 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# tcga data
+```{r}
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+names(tcga) # confirms what is inside 
+```
+
+```{r}
+# check HNSC patients
+# Get overlap
+all_ids <- rownames(tcga$HNSC_ArmCNV)
+neg_ids <- rownames(tcga$HNSC.HPVneg_ArmCNV)
+pos_ids <- rownames(tcga$HNSC.HPVpos_ArmCNV)
+
+intersect(neg_ids, all_ids)  # should match
+intersect(pos_ids, all_ids)  # should match
+
+# See how many overlap with "all"
+table(all_ids %in% c(neg_ids, pos_ids))
+```
+
+# CNV data
+```{r}
+# Load CNV status file
+cnv <- read.csv("CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", check.names = FALSE)
+colnames(cnv)[1] <- "Sample"
+
+# Check column names and find one with sample ID
+colnames(cnv)
+head(cnv)
+rownames(cnv)
+unique(cnv$TumorType)
+```
+
+```{r}
+# Filter for LUAD samples only
+cnv_luad <- cnv %>% 
+  filter(TumorType == "LUAD")   
+
+# Confirm
+unique(cnv_luad$TumorType)   
+head(cnv_luad)
+```
+
+Edit structure 
+```{r}
+# Rename 1st column to 'Sample'
+colnames(cnv)[1] <- "Sample"  
+```
+
+# Immune score 
+```{r}
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation")
+getwd()
+
+# Try reading the file using read.delim (tab-delimited)
+luad <- read.delim("xCell/LUAD_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+```
+
+View structure 
+```{r}
+# View structure
+head(luad)
+colnames(luad)
+```
+
+```{r}
+# Read LUAD
+luad <- read.delim("xCell/LUAD_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+luad_df <- as.data.frame(t(luad[,-1]))
+colnames(luad_df) <- luad$idx
+luad_df$Sample <- rownames(luad_df)
+luad_df$TumorType <- "LUAD"
+rownames(luad_df) <- NULL
+
+# Read HNSCC
+hnscc <- read.delim("xCell/HNSCC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+hnscc_df <- as.data.frame(t(hnscc[,-1]))
+colnames(hnscc_df) <- hnscc$idx
+hnscc_df$Sample <- rownames(hnscc_df)
+hnscc_df$TumorType <- "HNSCC"
+rownames(hnscc_df) <- NULL
+
+# Read UCEC
+ucec <- read.delim("xCell/UCEC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+ucec_df <- as.data.frame(t(ucec[,-1]))
+colnames(ucec_df) <- ucec$idx
+ucec_df$Sample <- rownames(ucec_df)
+ucec_df$TumorType <- "UCEC"
+rownames(ucec_df) <- NULL
+
+# combine
+# Bind all into one xCell table
+xcell_df <- bind_rows(luad_df, hnscc_df, ucec_df)
+```
+
+# Merge 
+check alignment first
+```{r}
+colnames(xcell_df)
+colnames(cnv_luad)
+```
+
+```{r}
+# Transpose: make cell types the columns, and samples the rows
+xcell_df <- as.data.frame(t(luad[,-1]))  # remove cell type column and transpose
+colnames(xcell_df) <- luad$idx           # set cell types as column names
+xcell_df$Sample_ID <- rownames(xcell_df) # move sample ID into a column
+rownames(xcell_df) <- NULL               # reset rownames
+
+# Rename xCell sample ID column
+colnames(xcell_df)[colnames(xcell_df) == "Sample_ID"] <- "Sample"
+
+# Check overlap (should match C3L-xxxx format)
+intersect(cnv_luad$Sample, xcell_df$Sample)
+setdiff(cnv_luad$Sample, xcell_df$Sample)  # in CNV but not in xCell
+setdiff(xcell_df$Sample, cnv_luad$Sample)  # in xCell but not in CNV
+```
+```{r}
+# Step 1: Transpose and format LUAD xCell data
+xcell_df <- as.data.frame(t(luad[,-1]))
+colnames(xcell_df) <- luad$idx
+xcell_df$Sample <- rownames(xcell_df)
+rownames(xcell_df) <- NULL
+
+# Step 2: Add TumorType manually
+xcell_df$TumorType <- "LUAD"
+
+# Step 3: Fix CNV column name
+colnames(cnv)[1] <- "Sample"
+
+# Step 4: Merge
+merged <- left_join(cnv, xcell_df, by = c("Sample", "TumorType"))
+```
+
+Merge
+```{r}
+# Make sure 'Sample' is correct in CNV file
+colnames(cnv)[1] <- "Sample"
+
+# Merge on Sample and TumorType
+merged <- left_join(cnv, xcell_df, by = c("Sample", "TumorType"))
+
+# Merge on 'Sample'
+merged <- left_join(cnv, xcell_df, by = "Sample") 
+table(merged$TumorType)
+```
+
+
+# Plot
+hao xhaox## LUAD 
+```{r}
+# Step 1: Make a filtered copy (Loss vs Neutral for 9p only)
+subset_9p <- merged %>%
+  mutate(
+    CNV_9p_status = case_when(
+      Arm_9p < -0.2 ~ "Loss",
+      Arm_9p >= -0.2 & Arm_9p <= 0.2 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_9p_status %in% c("Loss", "Neutral"))
+
+ggplot(subset_9p, aes(x = CNV_9p_status, y = `T cell CD8+`, fill = CNV_9p_status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+  labs(
+    title = "CD8+ T Cell Scores by 9p CNV Status (Loss vs Neutral)",
+    x = "9p CNV Status",
+    y = "xCell CD8+ T Score"
+  ) +
+  scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+library(ggpubr)
+
+ggplot(subset_9p, aes(x = CNV_9p_status, y = `T cell CD8+`, fill = CNV_9p_status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+  labs(
+    title = "CD8+ T Cell Scores by 9p CNV Status (Loss vs Neutral)",
+    x = "9p CNV Status",
+    y = "xCell CD8+ T Score"
+  ) +
+  scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+  stat_compare_means(method = "wilcox.test", label = "p.format") +  # <--- Wilcoxon p-value
+  theme_minimal(base_size = 14)
+```
+
+```{r}
+library(ggpubr)
+
+# Define mapping: plot label → column name
+celltype_map <- c(
+  "CD8+ T" = "T cell CD8+",
+  "CD4+ T" = "T cell CD4+ (non-regulatory)",
+  "B cell" = "B cell",
+  "NK cell" = "NK cell",
+  "Macrophage M1" = "Macrophage M1",
+  "Macrophage M2" = "Macrophage M2",
+  "Neutrophils" = "Neutrophil",
+  "Dendritic cell" = "Myeloid dendritic cell",
+  "Fibroblast" = "Cancer associated fibroblast",
+  "Endothelial cells" = "Endothelial cell"
+)
+
+# Recompute filtered subset (do not alter `merged`)
+subset_9p <- merged %>%
+  mutate(
+    CNV_9p_status = case_when(
+      Arm_9p < -0.2 ~ "Loss",
+      Arm_9p >= -0.2 & Arm_9p <= 0.2 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_9p_status %in% c("Loss", "Neutral"))
+
+# Generate one plot per cell type
+plots <- lapply(names(celltype_map), function(label) {
+  colname <- celltype_map[[label]]
+  
+  ggplot(subset_9p, aes_string(x = "CNV_9p_status", y = paste0("`", colname, "`"), fill = "CNV_9p_status")) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    labs(
+      title = paste0(label, " Scores by 9p CNV Status (Loss vs Neutral)"),
+      x = "9p CNV Status",
+      y = paste0("xCell ", label, " Score")
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", alternative = "less") +
+    theme_minimal(base_size = 14)
+})
+
+# Optional: display one (e.g., plots[[1]]) or arrange all with patchwork or cowplot
+print(plots[[3]])
+
+# Save all cell type boxplots to one multi-page PDF
+pdf("xCell_9pLoss_LUAD.pdf", width = 7, height = 5)  # adjust size as needed
+for (p in plots) {
+  print(p)
+}
+dev.off()
+```
+
+```{r}
+# Subset for LUAD and classify 1q gain vs neutral
+subset_1q <- merged %>%
+  filter(TumorType == "LUAD") %>%
+  mutate(
+    CNV_1q_status = case_when(
+      Arm_1q > 0.3 ~ "Gain",
+      Arm_1q >= -0.3 & Arm_1q <= 0.3 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_1q_status %in% c("Gain", "Neutral"))
+
+# Generate one boxplot per cell type
+plots_1q <- lapply(names(celltype_map), function(label) {
+  colname <- celltype_map[[label]]
+  
+  ggplot(subset_1q, aes_string(x = "CNV_1q_status", y = paste0("`", colname, "`"), fill = "CNV_1q_status")) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    labs(
+      title = paste0(label, " Scores by 1q CNV Status in LUAD (Gain vs Neutral)"),
+      x = "1q CNV Status",
+      y = paste0("xCell ", label, " Score")
+    ) +
+    scale_fill_manual(values = c("Gain" = "#EA6A6A", "Neutral" = "grey70")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format") +
+    theme_minimal(base_size = 14)
+})
+
+# Save to multi-page PDF
+pdf("xCell_1qGain_LUAD.pdf", width = 7, height = 5)
+for (p in plots_1q) {
+  print(p)
+}
+dev.off()
+
+```
+
+```{r}
+# Recompute filtered subset (do not alter `merged`)
+subset_9p <- merged %>%
+  mutate(
+    CNV_9p_status = case_when(
+      Arm_9p < -0.3 ~ "Loss",
+      Arm_9p >= -0.3 & Arm_9p <= 0.3 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_9p_status %in% c("Loss", "Neutral"))
+
+# Generate one plot per cell type
+plots <- lapply(names(celltype_map), function(label) {
+  colname <- celltype_map[[label]]
+  
+  ggplot(subset_9p, aes_string(x = "CNV_9p_status", y = paste0("`", colname, "`"), fill = "CNV_9p_status")) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    labs(
+      title = paste0(label, " Scores by 9p CNV Status (Loss vs Neutral)"),
+      x = "9p CNV Status",
+      y = paste0("xCell ", label, " Score")
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", alternative = "less") +
+    theme_minimal(base_size = 14)
+})
+
+# Optional: display one (e.g., plots[[1]]) or arrange all with patchwork or cowplot
+print(plots[[3]])
+
+# Save all cell type boxplots to one multi-page PDF
+pdf("xCell_9pLoss_LUAD.pdf", width = 7, height = 5)  # adjust size as needed
+for (p in plots) {
+  print(p)
+}
+dev.off()
+```
+
+```{r}
+# Recompute filtered subset (do not alter `merged`)
+subset_6q <- merged %>%
+  mutate(
+    CNV_6q_status = case_when(
+      Arm_6q < -0.3 ~ "Loss",
+      Arm_6q >= -0.3 & Arm_9p <= 0.3 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_6q_status %in% c("Loss", "Neutral"))
+
+# Generate one plot per cell type
+plots <- lapply(names(celltype_map), function(label) {
+  colname <- celltype_map[[label]]
+  
+  ggplot(subset_6q, aes_string(x = "CNV_6q_status", y = paste0("`", colname, "`"), fill = "CNV_6q_status")) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    labs(
+      title = paste0(label, " Scores by 6q CNV Status (Loss vs Neutral)"),
+      x = "6q CNV Status",
+      y = paste0("xCell ", label, " Score")
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", alternative = "less") +
+    theme_minimal(base_size = 14)
+})
+
+# Optional: display one (e.g., plots[[1]]) or arrange all with patchwork or cowplot
+# print(plots[[3]])
+
+# Save all cell type boxplots to one multi-page PDF
+pdf("xCell_6qLoss_LUAD.pdf", width = 7, height = 5)  # adjust size as needed
+for (p in plots) {
+  print(p)
+}
+dev.off()
+```
+
+```{r}
+# Step 2: Subset for HNSC and define 5q loss
+subset_5q <- merged %>%
+  filter(TumorType == "HNSC") %>%
+  mutate(
+    CNV_5q_status = case_when(
+      Arm_5q < -0.2 ~ "Loss",
+      Arm_5q >= -0.2 & Arm_5q <= 0.2 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(CNV_5q_status %in% c("Loss", "Neutral"))
+
+# Step 3: Plot each cell type (same layout, no loops)
+library(ggpubr)
+
+pdf("xCell_5qLoss_HNSC.pdf", width = 7, height = 5)
+
+for (label in names(celltype_map)) {
+  colname <- celltype_map[[label]]
+  
+  p <- ggplot(subset_5q, aes_string(x = "CNV_5q_status", y = paste0("`", colname, "`"), fill = "CNV_5q_status")) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+    labs(
+      title = paste0(label, " Scores by 5q CNV Status (Loss vs Neutral)"),
+      x = "5q CNV Status",
+      y = paste0("xCell ", label, " Score")
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4575b4", "Neutral" = "grey70")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format", alternative = "less") +
+    theme_minimal(base_size = 14)
+  
+  print(p)
+}
+
+dev.off()
+```
+
+## PLot others
+```{r}
+plot_cnv_status <- function(tumor, arm, direction = c("Gain", "Loss"), file_name) {
+  direction <- match.arg(direction)
+
+  # Extract data for given tumor
+  subset_df <- merged %>%
+    filter(TumorType == tumor)
+
+  # Create CNV_Status column based on direction
+  if (direction == "Gain") {
+    subset_df <- subset_df %>%
+      mutate(
+        CNV_Status = case_when(
+          !!sym(arm) > 0.3 ~ "Gain",
+          abs(!!sym(arm)) <= 0.3 ~ "Neutral",
+          TRUE ~ NA_character_
+        )
+      )
+  } else if (direction == "Loss") {
+    subset_df <- subset_df %>%
+      mutate(
+        CNV_Status = case_when(
+          !!sym(arm) < -0.3 ~ "Loss",
+          abs(!!sym(arm)) <= 0.3 ~ "Neutral",
+          TRUE ~ NA_character_
+        )
+      )
+  }
+
+  # Filter to valid comparisons
+  subset_df <- subset_df %>%
+    filter(CNV_Status %in% c(direction, "Neutral"))
+
+  if (nrow(subset_df) == 0) {
+    warning(paste("No data found for", tumor, arm, direction))
+    return(NULL)
+  }
+
+  # Make plots
+  plots <- lapply(names(celltype_map), function(label) {
+    colname <- celltype_map[[label]]
+    ggplot(subset_df, aes_string(x = "CNV_Status", y = paste0("`", colname, "`"), fill = "CNV_Status")) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+      geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+      labs(
+        title = paste0(label, " Scores by ", arm, " ", direction, " in ", tumor),
+        x = paste(arm, "CNV Status"),
+        y = paste0("xCell ", label, " Score")
+      ) +
+      scale_fill_manual(values = c("Gain" = "#EA6A6A", "Loss" = "#4575b4", "Neutral" = "grey70")) +
+      stat_compare_means(method = "wilcox.test", method.args = list(alternative = "less"), label = "p.format") +
+      theme_minimal(base_size = 14)
+  })
+
+  # Save PDF
+  pdf(file_name, width = 7, height = 5)
+  for (p in plots) print(p)
+  dev.off()
+}
+```
+
+```{r}
+# HNSC (not HNSCC — use exact TumorType label in your merged$TumorType)
+plot_cnv_status("HNSCC", "Arm_5q",  direction = "Loss", file_name = "xCell_5qLoss_HNSC.pdf")
+plot_cnv_status("HNSCC", "Arm_9p",  direction = "Loss", file_name = "xCell_9pLoss_HNSC.pdf")
+plot_cnv_status("HNSCC", "Arm_18p", direction = "Gain", file_name = "xCell_18pGain_HNSC.pdf")
+
+# UCEC
+plot_cnv_status("UCEC", "Arm_1q", direction = "Gain", file_name = "xCell_1qGain_UCEC.pdf")
+```
+
+Heatmaps
+```{r}
+library(tidyverse)
+library(pheatmap)
+
+# ---- Subset for relevant columns ----
+heatmap_df <- merged %>%
+  select(TumorType, starts_with("Arm_"), `T cell CD8+`) %>%
+  pivot_longer(cols = starts_with("Arm_"), names_to = "ChromArm", values_to = "CNV_Value") %>%
+  mutate(
+    CNV_Status = case_when(
+      CNV_Value > 0.3  ~ "Gain",
+      CNV_Value < -0.3 ~ "Loss",
+      TRUE             ~ "Neutral"
+    )
+  ) %>%
+  filter(CNV_Status %in% c("Gain", "Loss", "Neutral"))
+
+# ---- Wilcoxon test: Gain vs Neutral & Loss vs Neutral ----
+results <- heatmap_df %>%
+  group_by(TumorType, ChromArm, CNV_Status) %>%
+  summarise(score = list(`T cell CD8+`), .groups = "drop") %>%
+  pivot_wider(names_from = CNV_Status, values_from = score) %>%
+  mutate(
+    # Gain vs Neutral
+    gain_p = map2_dbl(Gain, Neutral, ~ if (!is.null(.x) && !is.null(.y) && length(.x) >= 5 && length(.y) >= 5)
+      wilcox.test(.x, .y)$p.value else NA),
+    gain_dir = map2_dbl(Gain, Neutral, ~ if (!is.null(.x) && !is.null(.y)) median(.x, na.rm=TRUE) - median(.y, na.rm=TRUE) else 0),
+    
+    # Loss vs Neutral
+    loss_p = map2_dbl(Loss, Neutral, ~ if (!is.null(.x) && !is.null(.y) && length(.x) >= 5 && length(.y) >= 5)
+      wilcox.test(.x, .y)$p.value else NA),
+    loss_dir = map2_dbl(Loss, Neutral, ~ if (!is.null(.x) && !is.null(.y)) median(.x, na.rm=TRUE) - median(.y, na.rm=TRUE) else 0),
+    
+    # Signed log10p
+    gain_logp = -log10(gain_p) * sign(gain_dir),
+    loss_logp = -log10(loss_p) * sign(loss_dir)
+  )
+
+# ---- Combine gain and loss into one long format ----
+gain_mat <- results %>%
+  select(TumorType, ChromArm, gain_logp) %>%
+  rename(log10p = gain_logp) %>%
+  mutate(Status = "Gain")
+
+loss_mat <- results %>%
+  select(TumorType, ChromArm, loss_logp) %>%
+  rename(log10p = loss_logp) %>%
+  mutate(Status = "Loss")
+
+combined_df <- bind_rows(gain_mat, loss_mat) %>%
+  unite(ArmStatus, ChromArm, Status) %>%
+  pivot_wider(names_from = ArmStatus, values_from = log10p) %>%
+  column_to_rownames("TumorType")
+
+# ---- Plot heatmap ----
+pheatmap(as.matrix(combined_df),
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         color = colorRampPalette(c("purple", "white", "brown"))(100),
+         breaks = seq(-5, 5, length.out = 101),
+         main = "CD8+ T Cell Association with CNV (Signed -log10 p)")
+```
+
+# Regression outputs
+
+```{r}
+rds_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/ImmuneScore_CNV_regression/CPTAC/Output_Rdata/xcell_Regression_Outputs.rds"
+regression_results <- readRDS(rds_path)
+
+Estimate_Regression_Outputs.rds
+```
+```{r}
+names(regression_results)
+```
+
+```{r}
+# Explore LUAD specifically
+luad_df <- regression_results[["LUAD"]]
+head(luad_df)
+colnames(luad_df)
+```
+
+```{r}
+# Load the file
+rna_path <- "/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/cptac_rna_tables.rds"
+rna_data <- readRDS(rna_path)
+head(rna_data)  
+
+names(rna_data)
+
+```
+
+
+```{r}
+
+# 1. Subset LUAD tumor type and Arm == "p" and Chromosome == "9"
+# We'll combine all immune cells' regression tables into one long data frame
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Extract LUAD results only (top-level name in regression_results list)
+luad_results <- regression_results[["LUAD"]]
+
+# Combine all immune cell regression tables into one
+combined_df <- bind_rows(lapply(names(luad_results), function(cell) {
+  df <- luad_results[[cell]]
+  df$Immune_Cell <- cell
+  return(df)
+}))
+
+# 2. Filter for 9p only (Chromosome 9, Arm p) and Focal_Level "Loss" or "None"
+df_9p <- combined_df %>%
+  filter(Chromosome == "9", Arm == "p") %>%
+  filter(Focal_Level %in% c("Loss", "None")) %>%
+  mutate(CNV_Status = ifelse(Focal_Level == "Loss", "9p_Loss", "Neutral"))
+
+# Extract immune cell names for LUAD 9p
+immune_cells_present <- df_9p %>%
+  pull(Immune_Cell) %>%
+  unique() %>%
+  sort()
+
+print(immune_cells_present)
+```
+
+
+```{r}
+# Check column names first
+colnames(df_9p)
+```
+
+```{r}
+
+# If p-value column is available (e.g., P_Value), filter top 5
+top5_cells <- df_9p %>%
+  group_by(Immune_Cell) %>%
+  summarise(min_p = min(P_val, na.rm = TRUE)) %>%
+  arrange(min_p) %>%
+  slice_head(n = 5) %>%
+  pull(Immune_Cell)
+
+# Filter df_9p to only those top 5
+df_9p_top5 <- df_9p %>%
+  filter(Immune_Cell %in% top5_cells)
+
+# Plot 5 most significant 
+ggplot(df_9p_top5, aes(x = CNV_Status, y = Coefficients, fill = CNV_Status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.4, size = 1.5) +
+  facet_wrap(~ Immune_Cell, scales = "free_y", nrow = 2) +
+  labs(
+    title = "Top 5 Significant Immune Cells in LUAD (9p Loss vs. Neutral)",
+    x = "CNV Status",
+    y = "Immune Score (xCell Regression Coefficient)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r}
+selected_immune_cells <- c(
+  "B_cell",
+  "T_cell_CD8",
+  "T_cell_CD4_memory",  # closest match for "T cell CD4"
+  "Endothelial_cell",
+  "Macrophage_M1",
+  "Macrophage_M2",
+  "Monocyte",
+  "Neutrophil",
+  "NK_cell"
+)
+
+# Subset LUAD data for selected immune cell types
+plot_df <- all_9p_data %>%
+  filter(Tumor == "LUAD", Immune_Cell %in% selected_immune_cells)
+
+# Plot with facet for visibility
+ggplot(plot_df, aes(x = CNV_Status, y = Score, fill = CNV_Status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  facet_wrap(~ Immune_Cell, scales = "free_y") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c("9p_Loss" = "#FF9999", "Neutral" = "#9999FF")) +
+  labs(
+    title = "xCell Immune Scores in LUAD Patients: 9p Loss vs. Neutral",
+    x = "CNV Status",
+    y = "Immune Score (xCell Regression Coefficient)"
+  )
+```
+
+# Run together 
+```{r}
+# LUAD
+luad <- read.delim("xCell/LUAD_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+luad_df <- as.data.frame(t(luad[,-1]))
+colnames(luad_df) <- luad$idx
+luad_df$Sample <- rownames(luad_df)
+luad_df$TumorType <- "LUAD"
+rownames(luad_df) <- NULL
+
+# HNSCC
+hnscc <- read.delim("xCell/HNSCC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+hnscc_df <- as.data.frame(t(hnscc[,-1]))
+colnames(hnscc_df) <- hnscc$idx
+hnscc_df$Sample <- rownames(hnscc_df)
+hnscc_df$TumorType <- "HNSCC"
+rownames(hnscc_df) <- NULL
+
+# UCEC
+ucec <- read.delim("xCell/UCEC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+ucec_df <- as.data.frame(t(ucec[,-1]))
+colnames(ucec_df) <- ucec$idx
+ucec_df$Sample <- rownames(ucec_df)
+ucec_df$TumorType <- "UCEC"
+rownames(ucec_df) <- NULL
+
+# combine
+xcell_df <- bind_rows(luad_df, hnscc_df, ucec_df)
+merged <- left_join(cnv, xcell_df, by = "Sample")
+```
+
+Plot 
+```{r}
+celltype_map <- c(
+  "CD8+ T" = "T cell CD8+",
+  "CD4+ T" = "T cell CD4+ (non-regulatory)",
+  "B cell" = "B cell",
+  "NK cell" = "NK cell",
+  "Macrophage M1" = "Macrophage M1",
+  "Macrophage M2" = "Macrophage M2",
+  "Neutrophils" = "Neutrophil",
+  "Dendritic cell" = "Myeloid dendritic cell",
+  "Fibroblast" = "Cancer associated fibroblast",
+  "Endothelial cells" = "Endothelial cell"
+)
+```
+
+```{r}
+plot_all_celltypes_by_cnv <- function(tumor, arm, direction = c("Gain", "Loss"), threshold = 0.3, filename_prefix = "xCell") {
+  direction <- match.arg(direction)
+
+  tumor_df <- merged %>%
+    filter(TumorType == tumor)
+
+  status_col <- paste0("CNV_", arm, "_status")
+  cnv_col <- arm 
+
+  tumor_df <- tumor_df %>%
+    mutate(
+      !!status_col := case_when(
+        direction == "Gain" & !!sym(cnv_col) >  threshold ~ "Gain",
+        direction == "Loss" & !!sym(cnv_col) < -threshold ~ "Loss",
+        abs(!!sym(cnv_col)) <= threshold ~ "Neutral",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    filter(!!sym(status_col) %in% c(direction, "Neutral"))
+
+  if (nrow(tumor_df) == 0) {
+    warning(paste("No data found for", tumor, arm, direction))
+    return(NULL)
+  }
+
+  plots <- lapply(names(celltype_map), function(label) {
+    colname <- celltype_map[[label]]
+    ggplot(tumor_df, aes_string(x = status_col, y = paste0("`", colname, "`"), fill = status_col)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+      geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+      labs(
+        title = paste0(label, " Scores by ", arm, " ", direction, " in ", tumor),
+        x = paste(arm, "CNV Status"),
+        y = paste0("xCell ", label, " Score")
+      ) +
+      scale_fill_manual(values = c("Gain" = "#EA6A6A", "Loss" = "#4575b4", "Neutral" = "grey70")) +
+      stat_compare_means(method = "wilcox.test", label = "p.format", method.args = list(alternative = "less")) +
+      theme_minimal(base_size = 14)
+  })
+
+  pdf(paste0(filename_prefix, "_", gsub("Arm_", "", arm), direction, "_", tumor, ".pdf"), width = 7, height = 5)
+  for (p in plots) print(p)
+  dev.off()
+}
+
+# save as pdf
+plot_all_celltypes_by_cnv("LUAD", "Arm1q", direction = "Gain")
+plot_all_celltypes_by_cnv("HNSCC", "Arm9p", direction = "Loss")
+plot_all_celltypes_by_cnv("UCEC", "Arm1q", direction = "Gain")
+```
+
+## PAAD
+prepare the data
+```{r}
+library (dplyr)
+# PDA xCell file
+pda <- read.delim("xCell/PDA_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+
+# Transpose and reformat
+pda_df <- as.data.frame(t(pda[,-1]))
+colnames(pda_df) <- pda$idx
+pda_df$Sample <- rownames(pda_df)
+rownames(pda_df) <- NULL
+
+# PDA CNV file
+pda_cnv <- cnv %>%
+  filter(TumorType == "PDA")
+
+# Merge only PDA data
+merged <- left_join(pda_cnv, pda_df, by = "Sample")
+table(merged$TumorType) # confirm merge
+```
+
+```{r}
+# PDA 1q Gain
+plot_all_celltypes_by_cnv("PDA", "Arm_1q", direction = "Gain")
+
+# PDA 1p Loss
+plot_all_celltypes_by_cnv("PDA", "Arm_1p", direction = "Loss")
+
+# PDA 6q Loss
+plot_all_celltypes_by_cnv("PDA", "Arm_6q", direction = "Loss")
+
+# PDA 9p Loss
+plot_all_celltypes_by_cnv("PDA", "Arm_9p", direction = "Loss")
+```
+
+```{r}
+# Base R version (Spearman)
+cor.test(merged$`Macrophage M1`, merged$`T cell CD8+`, method = "spearman")
+
+# Or Pearson if you expect a linear relationship
+cor.test(merged_pda$`Macrophage M1`, merged_pda$`T cell CD8+`, method = "pearson")
+```
+
+```{r}
+# Define 1q gain vs neutral
+merged_pda <- merged %>%
+  mutate(
+    CNV_1q_status = case_when(
+      Arm_1q > 0.3 ~ "Gain",
+      abs(Arm_1q) <= 0.3 ~ "Neutral",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Then filter for 1q gain only
+gain_only <- merged_pda %>% filter(CNV_1q_status == "Gain")
+
+# Correlation in gain group
+cor.test(gain_only$`Macrophage M1`, gain_only$`T cell CD8+`, method = "spearman")
+```
+
+# Figures for manuscript
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+
+plot_selected_cnv_celltypes <- function(tumor, arm, direction = c("Gain", "Loss"), selected_cells, threshold = 0.3, filename) {
+  direction <- match.arg(direction)
+
+  tumor_df <- merged %>%
+    filter(TumorType == tumor)
+
+  status_col <- paste0("CNV_", arm, "_status")
+  cnv_col <- paste0("Arm_", gsub("Arm_", "", arm))
+
+  tumor_df <- tumor_df %>%
+    mutate(
+      !!status_col := case_when(
+        direction == "Gain" & !!sym(cnv_col) >  threshold ~ "Gain",
+        direction == "Loss" & !!sym(cnv_col) < -threshold ~ "Loss",
+        abs(!!sym(cnv_col)) <= threshold ~ "Neutral",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    filter(!!sym(status_col) %in% c(direction, "Neutral"))
+
+  if (nrow(tumor_df) == 0) {
+    warning(paste("No data found for", tumor, arm, direction))
+    return(NULL)
+  }
+
+  plots <- lapply(names(selected_cells), function(label) {
+    colname <- selected_cells[[label]]
+    ggplot(tumor_df, aes_string(x = status_col, y = paste0("`", colname, "`"), fill = status_col)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+      labs(
+        title = paste0(label, " Scores by ", arm, " ", direction, " in ", tumor),
+        x = paste(arm, "CNV Status"),
+        y = paste0("xCell ", label, " Score")
+      ) +
+      scale_fill_manual(values = c("Gain" = "#EA6A6A", "Loss" = "#4575b4", "Neutral" = "grey70")) +
+      stat_compare_means(method = "wilcox.test", label = "p.format", method.args = list(alternative = "less")) +
+      theme_classic(base_size = 14)
+  })
+
+  pdf(filename, width = 7, height = 5)
+  for (p in plots) print(p)
+  dev.off()
+}
+```
+
+```{r}
+# LUAD: Arm 1q Gain (B cell), Arm 6q Loss (CD8+ T, Neutrophils)
+plot_selected_cnv_celltypes("LUAD", "Arm1q", "Gain", selected_cells = c("B cell" = "B cell"), filename = "LUAD_Arm1q_Gain.pdf")
+plot_selected_cnv_celltypes("LUAD", "Arm6q", "Loss", selected_cells = c(
+  "CD8+ T" = "T cell CD8+",
+  "Neutrophils" = "Neutrophil"
+), filename = "LUAD_Arm6q_Loss.pdf")
+
+# HNSCC: Arm 5q Loss (Mac M1, Mac M2, Endo), Arm 9p Loss (CD8+ T, Mac M1, Mac M2)
+plot_selected_cnv_celltypes("HNSCC", "Arm5q", "Loss", selected_cells = c(
+  "Macrophage M1" = "Macrophage M1",
+  "Macrophage M2" = "Macrophage M2",
+  "Endothelial cells" = "Endothelial cell"
+), filename = "HNSCC_Arm5q_Loss.pdf")
+
+plot_selected_cnv_celltypes("HNSCC", "Arm9p", "Loss", selected_cells = c(
+  "CD8+ T" = "T cell CD8+",
+  "Macrophage M1" = "Macrophage M1",
+  "Macrophage M2" = "Macrophage M2"
+), filename = "HNSCC_Arm9p_Loss.pdf")
+
+# UCEC: Arm 1q Gain (Dendritic, Fibroblast, Endothelial)
+plot_selected_cnv_celltypes("UCEC", "Arm1q", "Gain", selected_cells = c(
+  "Dendritic cell" = "Myeloid dendritic cell",
+  "Fibroblast" = "Cancer associated fibroblast",
+  "Endothelial cells" = "Endothelial cell"
+), filename = "UCEC_Arm1q_Gain.pdf")
+```
+
+
+# UCEC combine dataset
+```{r}
+# 1. Read xCell matrix (from .cct)
+ucec_raw <- read.delim("xCell/UCEC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+
+# Transpose and preserve sample IDs
+ucec_matrix <- t(ucec_raw[,-1])                # transpose values only
+colnames(ucec_matrix) <- ucec_raw$idx          # cell types become column names
+ucec_df <- as.data.frame(ucec_matrix)
+ucec_df$Idx <- rownames(ucec_matrix)
+
+# Preserve rownames FIRST before removing them
+ucec_df <- as.data.frame(ucec_matrix)
+ucec_df$Idx <- rownames(ucec_matrix)   
+rownames(ucec_df) <- NULL 
+colnames(ucec_df)
+head(ucec_df)
+cat("Patients in ucec_df:", length(unique(ucec_df$Idx)), "\n")
+```
+
+```{r}
+# load MSI status 
+clinical <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/CPTAC_additional data/clinical.csv", header = TRUE, check.names = FALSE)
+colnames(clinical)
+table(clinical$MSI_status, useNA = "ifany")  # Check MSI-H count
+
+# Filter to MSI-H samples
+clinical_MSIH <- clinical %>%
+  filter(MSI_status == "MSI-H")
+```
+
+```{r}
+ucec_confirm <- read.delim("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/CPTAC_additional data/UCEC_confirmatory_meta_table_v2.0.1.txt", header = TRUE, sep = "\t")
+cat("Patients in ucec_confirm:", length(unique(ucec_confirm$Idx)), "\n")
+colnames(ucec_confirm)  # Check available columns
+head(ucec_confirm[, 1:10])  # See sample IDs and structure
+
+# Remove prefix from ucec_confirm column names
+colnames(ucec_confirm) <- gsub("^xCell_", "", colnames(ucec_confirm))
+head(ucec_confirm)
+
+# Count number of samples per MSI status
+table(ucec_confirm$MSI_status, useNA = "ifany")
+
+# Filter to only MSI-H samples
+# Keep only MSI-H rows from ucec_confirm
+ucec_confirm_MSIH <- ucec_confirm %>%
+  filter(MSI_status == "MSI-H")
+
+merged_ucec_MSIH <- full_join(clinical_MSIH, ucec_confirm_MSIH, by = "Idx")
+```
+
+```{r}
+# Patients in each datasets
+cat("Patients in ucec_1_df (xCell):", length(unique(ucec_1_df$Sample)), "\n")
+cat("Patients in ucec_2 (confirmatory):", length(unique(ucec_2$Sample)), "\n")
+```
+
+```{r}
+library(dplyr)
+merged_ucec <- full_join(ucec_df, ucec_confirm, by = "Idx")
+```
+
+```{r}
+# Read CNV data and filter to UCEC only
+cnv <- read.csv("CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", check.names = FALSE)
+colnames(cnv)[1] <- "Sample"
+colnames(cnv)[1:10]  # Look at the first few column names
+head(cnv)
+
+#only ucec 
+ucec_cnv <- cnv[cnv$TumorType == "UCEC", ]
+head(ucec_cnv)
+
+# add an additional sample column because CNV is named differently, required for merging 
+merged_ucec$Sample <- merged_ucec$Idx  # duplicate Idx as Sample
+
+```
+
+
+```{r}
+# define 1q gain 
+ucec_cnv$CNV_1q_status <- ifelse(ucec_cnv$Arm_1q > 0.2, "Gain", "Non-Gain")
+
+# merge with CNV data 
+final_merged <- inner_join(merged_ucec, ucec_cnv[, c("Sample", "CNV_1q_status")], by = "Sample")
+```
+
+```{r}
+# Define all cell types to include
+cell_types_to_plot <- c(
+  "B cell", "T cell CD8+", "Macrophage", "Macrophage M1", "Macrophage M2",
+  "NK cell", "T cell regulatory (Tregs)", "immune score", "Endothelial cell", "stroma score"
+)
+
+# 4. Plot and save all plots into a single PDF
+library(ggplot2)
+
+pdf("UCEC_1qGain_CellType_Boxplots.pdf", width = 6, height = 5)
+
+for (cell_type in cell_types_to_plot) {
+  if (cell_type %in% colnames(final_merged)) {
+    p <- ggplot(final_merged, aes(x = CNV_1q_status, y = .data[[cell_type]], fill = CNV_1q_status)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.85) +
+      geom_jitter(width = 0.2, size = 1.2, alpha = 0.6) +
+      labs(title = paste(cell_type, "by 1q Gain Status (UCEC)"),
+           x = "1q CNV Status", y = cell_type) +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "none")
+    print(p)
+  } else {
+    message(paste("Skipping:", cell_type, "not found in dataset."))
+  }
+}
+
+dev.off()
+```
+
+
+```{r}
+# Optional: force order to ensure Non-Gain is gray, Gain is red
+final_merged$CNV_1q_status <- factor(final_merged$CNV_1q_status, levels = c("Non-Gain", "Gain"))
+
+# Define custom fill colors
+cnv_colors <- c("Non-Gain" = "gray60", "Gain" = "firebrick")
+
+# PDF output
+library(ggpubr)
+# Open PDF
+pdf("UCEC_1qGain_CellType_Boxplots_withPvalues.pdf", width = 6, height = 5)
+
+# Plot loop
+for (cell_type in cell_types_to_plot) {
+  if (cell_type %in% colnames(final_merged)) {
+    p <- ggplot(final_merged, aes(x = CNV_1q_status, y = .data[[cell_type]], fill = CNV_1q_status)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.85) +
+      geom_jitter(width = 0.2, size = 1.2, alpha = 0.6) +
+      stat_compare_means(
+        method = "wilcox.test",
+        label = "p.format",
+        size = 4,
+        label.y.npc = "top"
+      ) +
+      labs(
+        title = paste(cell_type, "by 1q Gain Status (UCEC)"),
+        x = "1q CNV Status",
+        y = cell_type
+      ) +
+      scale_fill_manual(values = cnv_colors) +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "none")
+
+    print(p)
+  } else {
+    message(paste("Skipping:", cell_type, "not found in dataset."))
+  }
+}
+
+dev.off()
+```
+
+
+```{r}
+# Create an empty data frame to store p-values
+pval_table <- data.frame(
+  CellType = character(),
+  P_Value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through cell types and calculate Wilcoxon test p-values
+for (cell_type in cell_types_to_plot) {
+  if (cell_type %in% colnames(final_merged)) {
+    # Subset data
+    df <- final_merged[, c("CNV_1q_status", cell_type)]
+    
+    # Run Wilcoxon test only if both Gain and Non-Gain groups exist
+    if (length(unique(df$CNV_1q_status)) == 2) {
+      test <- wilcox.test(df[[cell_type]] ~ df$CNV_1q_status)
+      pval_table <- rbind(pval_table, data.frame(
+        CellType = cell_type,
+        P_Value = test$p.value
+      ))
+    } else {
+      message(paste("Skipping:", cell_type, "- only one CNV group present."))
+    }
+  } else {
+    message(paste("Skipping:", cell_type, "not found in dataset."))
+  }
+}
+
+# Print table
+print(pval_table)
+
+# Optional: Sort by p-value
+pval_table <- pval_table[order(pval_table$P_Value), ]
+print(pval_table)
+```
+
+```{r}
+head(ucec_confirm_MSIH)
+```
+```{r}
+head(ucec_df)
+```
+
+
+
+## filter to only MSI 
+```{r}
+# 1. Read xCell matrix (from .cct)
+ucec_raw <- read.delim("xCell/UCEC_RNAseq_xCell_Tumor.cct", header = TRUE, check.names = FALSE)
+
+# Transpose and preserve sample IDs
+ucec_matrix <- t(ucec_raw[,-1])                # transpose values only
+colnames(ucec_matrix) <- ucec_raw$idx          # cell types become column names
+ucec_df <- as.data.frame(ucec_matrix)
+ucec_df$Idx <- rownames(ucec_matrix)
+
+# Preserve rownames FIRST before removing them
+ucec_df <- as.data.frame(ucec_matrix)
+ucec_df$Idx <- rownames(ucec_matrix)   
+rownames(ucec_df) <- NULL 
+colnames(ucec_df)
+head(ucec_df)
+cat("Patients in ucec_df:", length(unique(ucec_df$Idx)), "\n")
+```
+
+```{r}
+# load MSI status 
+clinical <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/CPTAC_additional data/clinical.csv", header = TRUE, check.names = FALSE)
+colnames(clinical)
+table(clinical$MSI_status, useNA = "ifany")  # Check MSI-H count
+
+# Filter to MSI-H samples
+clinical_MSIH <- clinical %>%
+  filter(MSI_status == "MSI-H")
+```
+
+```{r}
+ucec_confirm <- read.delim("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/CPTAC_additional data/UCEC_confirmatory_meta_table_v2.0.1.txt", header = TRUE, sep = "\t")
+cat("Patients in ucec_confirm:", length(unique(ucec_confirm$Idx)), "\n")
+colnames(ucec_confirm)  # Check available columns
+head(ucec_confirm[, 1:10])  # See sample IDs and structure
+
+# Remove prefix from ucec_confirm column names
+colnames(ucec_confirm) <- gsub("^xCell_", "", colnames(ucec_confirm))
+head(ucec_confirm)
+
+# Count number of samples per MSI status
+table(ucec_confirm$MSI_status, useNA = "ifany")
+
+# Filter to only MSI-H samples
+# Keep only MSI-H rows from ucec_confirm
+ucec_confirm_MSIH <- ucec_confirm %>%
+  filter(MSI_status == "MSI-H")
+
+merged_ucec_MSIH <- full_join(ucec_df, ucec_confirm_MSIH, by = "Idx")
+merged_ucec_MSIH$Sample <- merged_ucec_MSIH$Idx  # Add Sample column for CNV join
+```
+
+
+```{r}
+# 1. Read CNV data
+cnv <- read.csv("CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", check.names = FALSE)
+colnames(cnv)[1] <- "Sample"
+
+# 2. Filter to UCEC only
+ucec_cnv <- cnv[cnv$TumorType == "UCEC", ]
+
+# 3. Create CNV_1q_status column
+ucec_cnv$CNV_1q_status <- ifelse(ucec_cnv$Arm_1q > 0.2, "Gain", "Non-Gain")
+table(ucec_cnv$CNV_1q_status, useNA = "ifany") 
+
+# 4. Create matching column in your MSI-H merged dataframe
+merged_ucec_MSIH$Sample <- merged_ucec_MSIH$Idx
+
+# 5. Merge CNV status into the MSI-H dataframe
+merged_ucec_MSIH <- left_join(merged_ucec_MSIH, ucec_cnv[, c("Sample", "CNV_1q_status")], by = "Sample")
+colnames(merged_ucec_MSIH)
+```
+
+```{r}
+# 4. Ensure Sample column exists in both dataframes
+merged_ucec_MSIH$Sample <- merged_ucec_MSIH$Idx  # Should already exist from before
+
+# 5. Merge CNV status into MSI-H dataframe
+merged_ucec_MSIH <- left_join(merged_ucec_MSIH, ucec_cnv[, c("Sample", "CNV_1q_status")], by = "Sample")
+colnames(merged_ucec_MSIH)
+# 6. Filter out rows without CNV info (i.e., no match found)
+final_merged_MSIH <- merged_ucec_MSIH %>%
+  filter(!is.na(CNV_1q_status))
+
+# 7. Confirm success
+table(final_merged_MSIH$CNV_1q_status, useNA = "ifany")
+```
+
+
+```{r}
+# These are the exact columns you want to plot
+cell_types_to_plot <- c(
+  "Myeloid dendritic cell activated",
+  "B cell",
+  "T cell CD4+ memory",
+  "T cell CD4+ naive",
+  "T cell CD4+ (non-regulatory)",
+  "T cell CD4+ central memory",
+  "T cell CD4+ effector memory",
+  "T cell CD8+ naive",
+  "T cell CD8+",
+  "T cell CD8+ central memory",
+  "T cell CD8+ effector memory",
+  "Endothelial cell",
+  "Cancer associated fibroblast",
+  "Macrophage M1",
+  "Macrophage M2",
+  "NK cell",
+  "T cell NK",
+  "T cell gamma delta",
+  "T cell CD4+ Th1",
+  "T cell CD4+ Th2",
+  "T cell regulatory (Tregs)",
+  "immune score",
+  "stroma score"
+)
+
+# Filter: Remove NAs in CNV status
+final_merged_MSIH <- merged_ucec_MSIH %>%
+  filter(!is.na(CNV_1q_status))
+
+# Factor CNV status
+final_merged_MSIH$CNV_1q_status <- factor(final_merged_MSIH$CNV_1q_status, levels = c("Non-Gain", "Gain"))
+
+# Plot colors
+cnv_colors <- c("Non-Gain" = "gray60", "Gain" = "firebrick")
+
+# Open PDF
+pdf("UCEC_MSIH_1qGain_Selected_CellTypes_Boxplots.pdf", width = 6, height = 5)
+
+# Loop through and plot
+for (celltype in cell_types_to_plot) {
+  if (celltype %in% colnames(final_merged_MSIH)) {
+    p <- ggplot(final_merged_MSIH, aes(x = CNV_1q_status, y = .data[[celltype]], fill = CNV_1q_status)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.85) +
+      geom_jitter(width = 0.2, size = 1.2, alpha = 0.6) +
+      stat_compare_means(method = "wilcox.test", label = "p.format", size = 4, label.y.npc = "top") +
+      labs(
+        title = paste(celltype, "by 1q Gain Status (MSI-H UCEC)"),
+        x = "1q CNV Status",
+        y = celltype
+      ) +
+      scale_fill_manual(values = cnv_colors) +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "none")
+
+    print(p)
+  } else {
+    message(paste("❌ Not found:", celltype))
+  }
+}
+
+dev.off()
+```
+
