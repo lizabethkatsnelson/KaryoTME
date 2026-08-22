@@ -1,0 +1,13 @@
+# Data Availability
+
+Due to GitHub's file size limitations, large input files required to reproduce the analyses in this repository are not stored directly on GitHub. Instead, all input files larger than 25 MB have been deposited on Zenodo.
+
+The input data can be accessed and downloaded from:
+
+Zenodo:  https://zenodo.org/records/22059230
+
+
+We apologize for any inconvenience caused by the need to download these files separately. This arrangement allows us to provide the complete input datasets while keeping the GitHub repository within its file size limits.
+
+If you encounter any issues accessing or organizing the input files, please contact us @chenz05@nyu.edu or open an issue in this repository.
+
