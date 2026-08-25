@@ -1,0 +1,456 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+# ===== 0) Packages =====
+library(tidyverse)
+library(survival)
+library(survminer)
+library(stringr)
+library(broom)
+library(rlang)
+```
+
+
+```{r}
+# ===== 1) Load data =====
+clin_pt  <- read.delim("data_clinical_patient.txt",  skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt",   skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt",          check.names = FALSE, quote = "\"") %>%
+  tibble::rownames_to_column("SAMPLE_ID")
+
+clin_smp$SAMPLE_ID <- as.character(clin_smp$SAMPLE_ID)
+clin_smp$PATIENT_ID <- as.character(clin_smp$PATIENT_ID)
+cnv_raw$SAMPLE_ID  <- as.character(cnv_raw$SAMPLE_ID)
+```
+
+```{r}
+# ===== 2) CNV calls (±0.3) =====
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+arm_cols      <- grep("^Arm",          names(cnv_raw), value = TRUE)
+
+cnv_cat <- cnv_raw %>%
+  mutate(across(all_of(c(cytoband_cols, arm_cols)), ~ case_when(
+    .x >  0.3 ~ "Gain",
+    .x < -0.3 ~ "Loss",
+    TRUE      ~ "None"
+  )))
+```
+
+```{r}
+# ===== 3) Keep TMB from sample file and carry it through the merge =====
+stopifnot("TMB_NONSYNONYMOUS" %in% names(clin_smp))
+clin_smp <- clin_smp %>%
+  mutate(
+    SAMPLE_ID = as.character(SAMPLE_ID),
+    PATIENT_ID = as.character(PATIENT_ID),
+    TMB = suppressWarnings(as.numeric(TMB_NONSYNONYMOUS))
+  )
+
+
+# -- include TMB in the sample_info we join to CNV
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, SAMPLE_TYPE, TMB)
+
+merged_sample <- sample_info %>% left_join(cnv_cat, by = "SAMPLE_ID")
+```
+
+```{r}
+# ===== 4) analysis frame (one row per sample), OS, standardized TMB =====
+safe_scale <- function(x) if (all(is.na(x))) rep(NA_real_, length(x)) else as.numeric(scale(x))
+
+df <- clin_pt %>%
+  mutate(PATIENT_ID = as.character(PATIENT_ID)) %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+  left_join(merged_sample, by = "PATIENT_ID") %>%
+  mutate(
+    OS    = if_else(grepl("LIVING", OS_STATUS), 0, 1),
+    TMB_z = safe_scale(TMB)
+  )
+
+df <- df %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1)) %>%
+  mutate(TMB_z = as.numeric(scale(TMB)))
+
+# quick sanity (optional)
+length(unique(df$PATIENT_ID))
+sum(!is.na(df$TMB))
+```
+
+```{r}
+# ===== 4) Build analysis frame (one row per sample), create OS and TMB_z =====
+df <- clin_pt %>%
+  mutate(PATIENT_ID = as.character(PATIENT_ID)) %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+  left_join(merged_sample, by = "PATIENT_ID") %>%
+  mutate(
+    OS    = if_else(grepl("LIVING", OS_STATUS), 0, 1),
+    TMB_z = as.numeric(scale(TMB))
+  )
+
+# quick sanity
+length(unique(df$PATIENT_ID))
+sum(!is.na(df$TMB))
+```
+
+```{r}
+# ===== 5) Cox: tumor × cytoband × (Gain/Loss), adjusted for TMB =====
+# ===== TMB-adjusted cytoband Cox results (one row per cancer × band × Gain/Loss) =====
+library(tidyverse)
+library(survival)
+library(broom)
+library(stringr)
+
+dir.create("out", showWarnings = FALSE)
+
+# cytoband columns present in df
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(df), value = TRUE)
+
+# result schema (pre-allocate so writing empty won't error)
+res_cyto_tmb <- tibble(
+  CANCER_TYPE = character(),
+  Cytoband    = character(),
+  Comparison  = character(),
+  N           = integer(),
+  HR_CNV      = double(),
+  LCL_CNV     = double(),
+  UCL_CNV     = double(),
+  P_CNV       = double(),
+  log2HR      = double(),
+  # optional: TMB coefficient (per SD) when model includes TMB
+  HR_TMB_SD   = double(),
+  LCL_TMB_SD  = double(),
+  UCL_TMB_SD  = double(),
+  P_TMB       = double()
+)
+
+for (tumor in sort(unique(df$CANCER_TYPE))) {
+  d_tumor <- df %>% filter(CANCER_TYPE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+  if (nrow(d_tumor) == 0) next
+  
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain","Loss")) {
+      
+      dat <- d_tumor %>%
+        filter(!is.na(OS_MONTHS), !is.na(OS),
+               !!sym(band) %in% c("None", comparison)) %>%
+        mutate(
+          CNV   = factor(!!sym(band), levels = c("None", comparison)),
+          TMB_z = suppressWarnings(as.numeric(scale(TMB)))
+        )
+      
+      if (nrow(dat) < 10 || n_distinct(dat$CNV) < 2) next
+      
+      # include TMB only if there's at least some non-NA variance
+      use_tmb <- any(!is.na(dat$TMB_z)) && sd(dat$TMB_z, na.rm = TRUE) > 0
+      fml <- if (use_tmb) Surv(OS_MONTHS, OS) ~ CNV + TMB_z else Surv(OS_MONTHS, OS) ~ CNV
+      
+      fit <- try(coxph(fml, data = dat, ties = "efron"), silent = TRUE)
+      if (inherits(fit, "try-error")) next
+      
+      td <- tidy(fit, exponentiate = TRUE, conf.int = TRUE)
+      row_cnv <- td %>% filter(grepl("^CNV", term)) %>% slice(1)
+      row_tmb <- if (use_tmb) td %>% filter(term == "TMB_z") %>% slice(1) else tibble()
+      
+      res_cyto_tmb <- add_row(
+        res_cyto_tmb,
+        CANCER_TYPE = tumor,
+        Cytoband    = band,
+        Comparison  = comparison,
+        N           = nrow(dat),
+        HR_CNV      = if (nrow(row_cnv)) row_cnv$estimate else NA_real_,
+        LCL_CNV     = if (nrow(row_cnv)) row_cnv$conf.low else NA_real_,
+        UCL_CNV     = if (nrow(row_cnv)) row_cnv$conf.high else NA_real_,
+        P_CNV       = if (nrow(row_cnv)) row_cnv$p.value else NA_real_,
+        log2HR      = if (nrow(row_cnv) && is.finite(row_cnv$estimate)) log2(row_cnv$estimate) else NA_real_,
+        HR_TMB_SD   = if (nrow(row_tmb)) row_tmb$estimate else NA_real_,
+        LCL_TMB_SD  = if (nrow(row_tmb)) row_tmb$conf.low else NA_real_,
+        UCL_TMB_SD  = if (nrow(row_tmb)) row_tmb$conf.high else NA_real_,
+        P_TMB       = if (nrow(row_tmb)) row_tmb$p.value else NA_real_
+      )
+    }
+  }
+}
+
+# signed -log10(p) for CNV (TMB-adjusted when TMB was included)
+if (nrow(res_cyto_tmb) > 0) {
+  res_cyto_tmb <- res_cyto_tmb %>%
+    mutate(
+      sign_dir  = case_when(is.na(log2HR) ~ NA_real_, log2HR > 0 ~ 1, TRUE ~ -1),
+      sign_logP = ifelse(is.finite(P_CNV),
+                         -log10(pmax(P_CNV, .Machine$double.xmin)) * sign_dir,
+                         NA_real_)
+    )
+}
+
+# write CSV
+write_csv(res_cyto_tmb, "All_CancerTypes_Cytoband_SurvivalResults_TMBadj.csv")
+
+# quick peek
+res_cyto_tmb %>% slice_head(n = 10)
+```
+
+
+```{r}
+# ── TMB-adjusted area plots ───────────────────────────────────────────────────
+library(tidyverse)
+library(ggplot2)
+library(gtools)
+library(stringr)
+
+# 1) Load the TMB-adjusted results
+tmb <- readr::read_csv("All_CancerTypes_Cytoband_SurvivalResults_TMBadj.csv",
+                       show_col_types = FALSE)
+
+# 2) Normalize columns so plotting code works the same as before
+tmb <- tmb %>%
+  mutate(
+    # if Event isn't present, create it from Comparison
+    Event = if ("Event" %in% names(.)) Event else Comparison,
+    # if sign_logP is missing, compute from P_CNV and log2HR (direction)
+    sign_logP = if ("sign_logP" %in% names(.) && any(!is.na(sign_logP))) sign_logP else {
+      dir <- case_when(is.na(log2HR) ~ NA_real_, log2HR > 0 ~ 1, TRUE ~ -1)
+      -log10(pmax(P_CNV, .Machine$double.xmin)) * dir
+    }
+  ) %>%
+  # keep rows we can draw
+  filter(!is.na(CANCER_TYPE), !is.na(Cytoband), !is.na(Event), is.finite(sign_logP))
+
+# quick sanity: do we have both Gain/Loss per tumour?
+tmb %>%
+  count(CANCER_TYPE, Event) %>%
+  arrange(CANCER_TYPE, Event) %>%
+  print(n = 100)
+
+# 3) Make sure an output directory exists
+out_dir <- "HR_area_plots_TMBadj"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+# 4) Helper to build one tumour's area plot
+plot_cnv_area_tmb <- function(df, tumour, signif_cut = 1.3) {
+  chr_levels <- c(as.character(1:22), "X", "Y")
+  
+  pd <- df %>%
+    filter(CANCER_TYPE == tumour) %>%
+    mutate(
+      Arm        = str_extract(Cytoband, "^[0-9XY]+[pq]"),
+      Chromosome = str_extract(Arm, "^[0-9XY]+"),
+      Chromosome = factor(Chromosome, levels = chr_levels)
+    ) %>%
+    arrange(Chromosome, Cytoband) %>%
+    mutate(
+      Cytoband = factor(Cytoband, levels = mixedsort(unique(Cytoband))),
+      idx      = row_number()
+    )
+  
+  if (nrow(pd) == 0) return(NULL)
+
+  # guides
+  centromere_idx <- pd %>%
+    filter(str_detect(Arm, "q")) %>%
+    group_by(Chromosome) %>%
+    slice_head(n = 1) %>%
+    pull(idx)
+
+  chr_last_idx <- pd %>%
+    group_by(Chromosome) %>%
+    slice_tail(n = 1) %>%
+    pull(idx)
+
+  chr_mid_idx <- pd %>%
+    group_by(Chromosome) %>%
+    summarise(idx = floor(mean(range(idx))), .groups = "drop")
+
+  ggplot(pd, aes(idx, sign_logP, fill = Event)) +
+    geom_area(position = "identity", alpha = 0.75) +
+    geom_hline(yintercept = 0, linewidth = .25) +
+    geom_hline(yintercept = c(-signif_cut, signif_cut),
+               colour = "grey40", linetype = "dotted", linewidth = .25) +
+    geom_vline(xintercept = chr_last_idx + 0.5, colour = "black", linewidth = .3) +
+    geom_vline(xintercept = centromere_idx, colour = "grey30",
+               linetype = "dashed", linewidth = .25) +
+    scale_fill_manual(values = c(Gain = "#D64045", Loss = "#375E97")) +
+    scale_x_continuous(breaks = chr_mid_idx$idx,
+                       labels = chr_mid_idx$Chromosome,
+                       expand = c(0, 0)) +
+    labs(title = paste("Signed -log10(p) CNV Survival (TMB-adj) –", tumour),
+         x = "chromosome",
+         y = "signed -log(p)",
+         fill = "Event") +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x      = element_text(size = 6),
+          plot.title       = element_text(face = "bold", size = 12))
+}
+
+# 5) Loop and save one PDF per tumour
+unique(tmb$CANCER_TYPE) %>%
+  sort() %>%
+  purrr::walk(function(tumour) {
+    p <- plot_cnv_area_tmb(tmb, tumour)
+    if (!is.null(p)) {
+      fname <- gsub("[ /]", "_", tumour)
+      ggsave(file.path(out_dir, paste0(fname, "_HR_area_TMBadj.pdf")),
+             p, width = 10, height = 5, useDingbats = FALSE)
+    }
+  })
+```
+
+
+```{r}
+# ===== Compare non-adjusted vs TMB-adjusted cytoband results (robust) =====
+library(tidyverse)
+
+alpha <- 0.10  # significance threshold
+
+nonadj_path <- "All_CancerTypes_Cytoband_SurvivalResults.csv"
+tmbadj_path <- "All_CancerTypes_Cytoband_SurvivalResults_TMBadj.csv"
+
+nonadj <- readr::read_csv(nonadj_path, show_col_types = FALSE)
+tmbadj <- readr::read_csv(tmbadj_path, show_col_types = FALSE)
+
+# helper: pick first available column name from candidates
+pick_first <- function(df, candidates) {
+  nm <- intersect(candidates, names(df))
+  if (length(nm)) nm[1] else NA_character_
+}
+
+# --- figure out columns (allow multiple naming variants) ---
+# keys
+stopifnot("CANCER_TYPE" %in% names(nonadj), "CANCER_TYPE" %in% names(tmbadj))
+stopifnot("Cytoband"    %in% names(nonadj), "Cytoband"    %in% names(tmbadj))
+
+evt_non_col <- pick_first(nonadj, c("Event","Comparison"))
+evt_tmb_col <- pick_first(tmbadj, c("Event","Comparison"))
+stopifnot(!is.na(evt_non_col), !is.na(evt_tmb_col))  # must have an event column
+
+# p-values
+p_non_col  <- pick_first(nonadj, c("P_CNV","Raw_P_Cox","P","p","p.value"))
+p_tmb_col  <- pick_first(tmbadj, c("P_CNV","Raw_P_Cox","P","p","p.value"))
+
+# HRs
+hr_non_col <- pick_first(nonadj, c("HR_CNV","HR","estimate","HazardRatio"))
+hr_tmb_col <- pick_first(tmbadj, c("HR_CNV","HR","estimate","HazardRatio"))
+
+# log2(HR)
+log2_non_col <- pick_first(nonadj, c("log2HR","logHR","log2_HR"))
+log2_tmb_col <- pick_first(tmbadj, c("log2HR","logHR","log2_HR"))
+
+# --- normalize both tables to a common schema ---
+normify <- function(df, evt_col, p_col, hr_col, log2_col) {
+  out <- tibble(
+    CANCER_TYPE = df$CANCER_TYPE,
+    Cytoband    = as.character(df$Cytoband),
+    Event       = df[[evt_col]],
+    P           = suppressWarnings(as.numeric(df[[p_col]])),
+    HR          = suppressWarnings(as.numeric(df[[hr_col]]))
+  )
+  # log2HR: prefer provided; else compute from HR if > 0
+  if (!is.na(log2_col) && log2_col %in% names(df)) {
+    out$log2HR <- suppressWarnings(as.numeric(df[[log2_col]]))
+  } else {
+    out$log2HR <- ifelse(is.finite(out$HR) & out$HR > 0, log2(out$HR), NA_real_)
+  }
+  out
+}
+
+non_norm <- normify(nonadj, evt_non_col, p_non_col, hr_non_col, log2_non_col)
+tmb_norm <- normify(tmbadj, evt_tmb_col, p_tmb_col, hr_tmb_col, log2_tmb_col)
+
+# --- full outer join and classify ---
+cmp <- full_join(
+  non_norm %>% rename(P_non = P, HR_non = HR, log2HR_non = log2HR),
+  tmb_norm %>% rename(P_tmb = P, HR_tmb = HR, log2HR_tmb = log2HR),
+  by = c("CANCER_TYPE","Cytoband","Event")
+) %>%
+  mutate(
+    sig_non = !is.na(P_non) & P_non < alpha,
+    sig_tmb = !is.na(P_tmb) & P_tmb < alpha,
+    dir_non = case_when(is.finite(log2HR_non) & log2HR_non >  0 ~ "Risk↑",
+                        is.finite(log2HR_non) & log2HR_non <  0 ~ "Risk↓",
+                        TRUE ~ NA_character_),
+    dir_tmb = case_when(is.finite(log2HR_tmb) & log2HR_tmb >  0 ~ "Risk↑",
+                        is.finite(log2HR_tmb) & log2HR_tmb <  0 ~ "Risk↓",
+                        TRUE ~ NA_character_),
+    status = case_when(
+      sig_non &  sig_tmb ~ "Retained (sig in both)",
+      sig_non & !sig_tmb ~ "Lost after TMB adj",
+     !sig_non &  sig_tmb ~ "New after TMB adj",
+      TRUE               ~ "NS in both"
+    ),
+    direction_changed = sig_non & sig_tmb & !is.na(dir_non) & !is.na(dir_tmb) & dir_non != dir_tmb
+  ) %>%
+  arrange(CANCER_TYPE, Cytoband, Event)
+
+# write outputs
+readr::write_csv(cmp, "CNV_TMBadj_comparison_by_event.csv")
+
+summary_by_tumor <- cmp %>%
+  group_by(CANCER_TYPE) %>%
+  summarise(
+    n_retained = sum(status == "Retained (sig in both)"),
+    n_lost     = sum(status == "Lost after TMB adj"),
+    n_new      = sum(status == "New after TMB adj"),
+    n_ns_both  = sum(status == "NS in both"),
+    n_flip_dir = sum(direction_changed),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_lost + n_new + n_flip_dir))
+
+readr::write_csv(summary_by_tumor, "CNV_TMBadj_summary_by_tumor.csv")
+
+# quick previews
+print(summary_by_tumor, n = Inf)
+
+top_changes <- cmp %>%
+  filter(status %in% c("Lost after TMB adj","New after TMB adj") | direction_changed) %>%
+  select(CANCER_TYPE, Cytoband, Event,
+         status, direction_changed,
+         P_non, HR_non, dir_non,
+         P_tmb, HR_tmb, dir_tmb) %>%
+  arrange(CANCER_TYPE, status, P_non, P_tmb)
+
+print(top_changes, n = 50)
+```
+
+```{r}
+library(dplyr)
+library(readr)
+
+# === Load both results ===
+naive <- read_csv("All_CancerTypes_Cytoband_SurvivalResults.csv")
+tmb   <- read_csv("All_CancerTypes_Cytoband_SurvivalResults_TMBadj.csv")
+
+# Harmonize key columns
+naive <- naive %>%
+  transmute(CANCER_TYPE, Cytoband, Comparison, HR = HR, P = Raw_P_Cox)
+
+tmb <- tmb %>%
+  transmute(CANCER_TYPE, Cytoband, Comparison, HR = HR_CNV, P = P_CNV)
+
+# Merge
+merged <- full_join(naive, tmb,
+                    by = c("CANCER_TYPE","Cytoband","Comparison"),
+                    suffix = c("_naive","_tmb"))
+
+# Decide significance (p < 0.1, adjust threshold if needed)
+merged <- merged %>%
+  mutate(sig_naive = !is.na(P_naive) & P_naive < 0.1,
+         sig_tmb   = !is.na(P_tmb)   & P_tmb   < 0.1)
+
+# Keep only cases where significance differs
+diff_hits <- merged %>%
+  filter(sig_naive != sig_tmb)
+
+# Print and save
+print(diff_hits, n = Inf)
+write_csv(diff_hits, "SignificanceDifferences_TMBvsNaive.csv")
+```
+

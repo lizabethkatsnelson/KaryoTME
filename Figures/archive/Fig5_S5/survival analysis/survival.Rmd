@@ -1,0 +1,1575 @@
+---
+title: "Survival analysis based on CNV"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(tidyverse)
+library(survival)
+# install.packages("survminer")       # installs survminer + its deps (ggplot2, ggpubr, etc.)
+library(survminer)
+#install.packages("xfun")   # upgrades to the current CRAN version (≥ 0.52)
+```
+
+```{r}
+##  FILE PATHS  
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/bulk seq/MSK_survival")   # change if needed
+
+# Load clinical data
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt", skip = 4, check.names = FALSE)
+
+# Load CNV table and clean SAMPLE_ID
+cnv_raw <- read.delim("all_cnv_table.txt", check.names = FALSE, quote = "\"") %>%
+  tibble::rownames_to_column("SAMPLE_ID")
+
+# Identify arm-level CNV columns
+arm_cols <- grep("^Arm", names(cnv_raw), value = TRUE)
+
+# Categorize CNVs into Gain / Loss / None
+cnv_cat <- cnv_raw %>%
+  mutate(across(all_of(arm_cols), ~ case_when(
+    .x >  0.2 ~ "Gain",
+    .x < -0.2 ~ "Loss",
+    TRUE      ~ "None"
+  )))
+```
+
+# (optional) Look at data 
+```{r}
+# Convert SAMPLE_ID columns to character to avoid join issues
+clin_smp$SAMPLE_ID <- as.character(clin_smp$SAMPLE_ID)
+cnv_raw$SAMPLE_ID  <- as.character(cnv_raw$SAMPLE_ID)
+```
+
+```{r}
+#READ TABLES
+clin_pt  <- read.delim(f_patient, skip = 4, check.names = FALSE)
+head(clin_pt)
+unique(clin_pt$DRUG_TYPE) # 3 types: "PD-1/PDL-1" "Combo"      "CTLA4"     
+```
+
+
+
+```{r}
+cnv_raw <- read.delim("all_cnv_table.txt", check.names = FALSE)
+
+## move row‑names (sample IDs) into a new column called SAMPLE_ID
+cnv_raw <- cnv_raw %>% 
+             rownames_to_column(var = "SAMPLE_ID")
+
+head(cnv_raw)
+```
+
+```{r}
+head(clin_smp)
+```
+
+
+## merge 
+```{r}
+# Step 1: Prepare clean sample info
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, SAMPLE_TYPE)
+
+# Step 2: Join sample_info with CNV matrix
+merged_sample <- sample_info %>%
+  left_join(cnv_cat, by = "SAMPLE_ID")
+
+# Step 3: Join patient-level clinical data
+df <- clin_pt %>%
+  select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+  left_join(merged_sample, by = "PATIENT_ID") %>%
+  mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+```
+
+## run cox models 
+```{r}
+results <- data.frame()
+
+for (arm in grep("^Arm", names(df), value = TRUE)) {
+  for (comparison in c("Gain", "Loss")) {
+    subset <- df[df[[arm]] %in% c("None", comparison),]
+    
+    # Skip if fewer than 10 samples or not enough variation
+    if (nrow(subset) >= 10 && length(unique(subset[[arm]])) == 2) {
+      subset[[arm]] <- factor(subset[[arm]], levels = c(comparison, "None"))
+      fit <- coxph(Surv(OS_MONTHS, OS) ~ subset[[arm]], data = subset)
+      hr <- exp(coef(fit))
+      ci <- round(exp(confint(fit)), 3)
+      p <- summary(fit)$coefficients[5]
+      
+      # Append one row per CANCER_TYPE group within the subset
+      results <- rbind(results, subset %>%
+        group_by(CANCER_TYPE) %>%
+        summarize(
+          Arm = arm,
+          Comparison = paste(comparison, "vs None"),
+          HR = round(hr, 3),
+          CI = paste(ci[1], ci[2], sep = " - "),
+          P = signif(p, 3),
+          log2HR = log2(hr),
+          Event = comparison,
+          N = n()
+        )
+      )
+    }
+  }
+}
+
+# save output
+# write.csv(results, "CNV_HR_table.csv", row.names = FALSE)
+```
+
+
+Comparing p values 
+- Rregression model 
+- Test HR = relative risk over time 
+  - Can adjust for co-variates 
+- HR = 2 --> 2x higher risk 
+```{r}
+# Cox significant hits p < 0.01 
+cox_sig_hits <- results %>% filter(P < 0.1)
+nrow(cox_sig_hits)
+```
+
+
+
+another try of filtering by omly PD1 on cancer type 
+```{r}
+results <- data.frame()
+
+for (tumor in unique(df$CANCER_TYPE)) {
+  tumor_data <- df %>%
+    filter(CANCER_TYPE == tumor,
+           DRUG_TYPE == "PD-1/PDL-1")  # Only PD-1/PDL-1 treated patients
+
+  for (arm in grep("^Arm", names(tumor_data), value = TRUE)) {
+    for (comparison in c("Gain", "Loss")) {
+
+      subset <- tumor_data %>%
+        filter(!!sym(arm) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c(comparison, "None")))
+
+      # Only run if enough samples and both CNV groups are present
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+        hr <- exp(coef(fit))
+        ci <- round(exp(confint(fit)), 3)
+        p <- summary(fit)$coefficients[5]
+
+        results <- rbind(results, data.frame(
+          CANCER_TYPE = tumor,
+          Arm = arm,
+          Comparison = paste(comparison, "vs None"),
+          HR = round(hr, 3),
+          CI = paste(ci[1], ci[2], sep = " - "),
+          P = signif(p, 3),
+          log2HR = log2(hr),
+          Event = comparison,
+          N = nrow(subset)
+        ))
+      }
+    }
+  }
+}
+```
+
+
+
+```{r}
+# KM plot example: Arm9p Loss vs None in Melanoma
+km_data <- df %>%
+  filter(CANCER_TYPE == "Melanoma", Arm9p %in% c("Loss", "None")) %>%
+  mutate(CNVstatus = factor(Arm9p, levels = c("Loss", "None")))
+
+km_fit <- survfit(Surv(OS_MONTHS, OS) ~ CNVstatus, data = km_data)
+
+ggsurvplot(km_fit, data = km_data,
+           pval = TRUE, risk.table = TRUE,
+           palette = c("#D64045", "grey20"),
+           title = "Melanoma – Arm9p Loss vs None",
+           xlab = "Time (months)", ylab = "Overall survival")
+```
+
+
+## plot arms with p<0.01 based on MSK survival 
+```{r}
+# Manually define significant tumor-arm-comparison combinations
+sig_hits <- tribble(
+  ~CANCER_TYPE, ~Arm,     ~Comparison,
+  "Bladder Cancer", "Arm11p", "Loss",
+  "Colorectal Cancer", "Arm20q", "Gain",
+  "Non-Small Cell Lung Cancer", "Arm8q", "Loss",
+  "Melanoma", "Arm1q", "Gain",
+  "Renal Cell Carcinoma", "Arm22q", "Loss",
+  "Melanoma", "Arm3q", "Loss",
+  "Bladder Cancer", "Arm21q", "Loss",
+  "Bladder Cancer", "Arm9q", "Loss",
+  "Head and Neck Cancer", "Arm14q", "Loss",
+  "Colorectal Cancer", "Arm13q", "Gain",
+  "Renal Cell Carcinoma", "Arm17p", "Gain"
+)
+
+
+# Output folder
+output_dir <- "KM_plots" # already in the current working directory 
+
+# Loop over each hit and generate KM plots by drug type
+for (i in 1:nrow(sig_hits)) {
+  tumor_type <- sig_hits$CANCER_TYPE[i]
+  arm <- sig_hits$Arm[i]
+  comparison <- sig_hits$Comparison[i]
+
+  for (drug in c("PD-1/PDL-1", "CTLA4", "Combo")) {
+    subset <- df %>%
+      filter(CANCER_TYPE == tumor_type,
+             DRUG_TYPE == drug,
+             !!sym(arm) %in% c("None", comparison)) %>%
+      mutate(CNVstatus = factor(!!sym(arm), levels = c(comparison, "None")))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNVstatus)) == 2) {
+      surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+      fit <- survfit(surv_obj ~ CNVstatus, data = subset)
+
+      p <- ggsurvplot(fit, data = subset,
+                      pval = TRUE, risk.table = TRUE,
+                      palette = c("#D64045", "grey20"),
+                      title = paste(tumor_type, arm, comparison, "vs None –", drug),
+                      xlab = "Time (months)", ylab = "Overall survival")
+
+      filename <- paste0(output_dir, "/", gsub(" ", "_", tumor_type), "_", arm, "_", comparison, "_", gsub("/", "", drug), ".pdf")
+      ggsave(filename, plot = p$plot, width = 7, height = 5)
+    }
+  }
+}
+```
+
+
+### by oncotree code 
+```{r}
+unique(df$ONCOTREE_CODE)
+```
+
+```{r}
+# Redefine significant hits using ONCOTREE_CODE instead of CANCER_TYPE
+sig_hits <- tribble(
+  ~ONCOTREE_CODE, ~Arm,   ~Comparison,
+  "LUAD",         "Arm1q",  "Gain",
+  "LUAD",         "Arm5q",  "Loss",
+  "LUAD",         "Arm6q",  "Loss",
+  "LUAD",         "Arm9p",  "Loss",
+  "SKCM",         "Arm6q",  "Loss",
+  "SKCM",         "Arm9p",  "Loss",
+  "PAAD",         "Arm1q",  "Gain",
+  "PAAD",         "Arm6q",  "Loss",
+  "PAAD",         "Arm9p",  "Loss",
+  "HNSC",  "Arm5q",  "Loss",
+  "HNSC",  "Arm9p",  "Loss",
+  "UCEC",     "Arm1q",  "Gain",
+  "BLCA",         "Arm9p",  "Loss",
+  "BLCA",         "Arm11p", "Loss"
+)
+
+# Output folder
+output_dir <- "KM_plots_by_oncotree"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Loop over each hit and generate KM plots by drug type
+for (i in 1:nrow(sig_hits)) {
+  onco_code <- sig_hits$ONCOTREE_CODE[i]
+  arm <- sig_hits$Arm[i]
+  comparison <- sig_hits$Comparison[i]
+
+  for (drug in c("PD-1/PDL-1", "CTLA4", "Combo")) {
+    subset <- df %>%
+      filter(ONCOTREE_CODE == onco_code,
+             DRUG_TYPE == drug,
+             !!sym(arm) %in% c("None", comparison)) %>%
+      mutate(CNVstatus = factor(!!sym(arm), levels = c(comparison, "None")))
+
+    if (nrow(subset) >= 10 && length(unique(subset$CNVstatus)) == 2) {
+      surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+      fit <- survfit(surv_obj ~ CNVstatus, data = subset)
+
+      p <- ggsurvplot(fit, data = subset,
+                      pval = TRUE, risk.table = TRUE,
+                      palette = c("#D64045", "grey20"),
+                      title = paste(onco_code, arm, comparison, "vs None –", drug),
+                      xlab = "Time (months)", ylab = "Overall survival")
+
+      filename <- paste0(output_dir, "/", onco_code, "_", arm, "_", comparison, "_", gsub("/", "", drug), ".pdf")
+      ggsave(filename, plot = p$plot, width = 7, height = 5)
+    }
+  }
+}
+```
+
+## PD1 only 
+count p < 0.01
+```{r}
+km_sig_hits <- data.frame()
+
+for (i in 1:nrow(cox_sig_hits)) {
+  tumor_type <- cox_sig_hits$CANCER_TYPE[i]
+  arm <- cox_sig_hits$Arm[i]
+  comparison <- cox_sig_hits$Event[i]
+
+  subset <- df %>%
+    filter(CANCER_TYPE == tumor_type,
+           DRUG_TYPE == "PD-1/PDL-1",
+           !!sym(arm) %in% c("None", comparison)) %>%
+    mutate(CNVstatus = factor(!!sym(arm), levels = c(comparison, "None")))
+
+  if (length(unique(subset$CNVstatus)) == 2) {
+    surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+    surv_diff <- survdiff(surv_obj ~ CNVstatus, data = subset)
+    km_p <- 1 - pchisq(surv_diff$chisq, df = 1)
+
+    if (km_p < 0.5) {
+      km_sig_hits <- rbind(km_sig_hits, data.frame(
+        CANCER_TYPE = tumor_type,
+        Arm = arm,
+        Comparison = comparison,
+        CoxP = cox_sig_hits$P[i],
+        KMP = signif(km_p, 3)
+      ))
+    }
+  }
+}
+
+nrow(km_sig_hits)
+```
+
+
+Dual p-value filtering
+```{r}
+# Output directory
+output_dir <- "KM_plots_PD1"
+# dir.create(output_dir, showWarnings = FALSE)
+
+# Initialize table of filtered hits
+km_sig_hits <- data.frame()
+
+# Loop through Cox-significant hits
+for (i in 1:nrow(cox_sig_hits)) {
+  tumor_type <- cox_sig_hits$CANCER_TYPE[i]
+  arm <- cox_sig_hits$Arm[i]
+  comparison <- cox_sig_hits$Event[i]
+  cox_p <- cox_sig_hits$P[i]
+
+  subset <- df %>%
+    filter(CANCER_TYPE == tumor_type,
+           DRUG_TYPE == "PD-1/PDL-1",
+           !!sym(arm) %in% c("None", comparison)) %>%
+    mutate(CNVstatus = factor(!!sym(arm), levels = c(comparison, "None")))
+
+  if (nrow(subset) >= 10) {
+    surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+    surv_diff <- survdiff(surv_obj ~ CNVstatus, data = subset)
+    km_p <- 1 - pchisq(surv_diff$chisq, df = 1)
+
+    if (km_p < 0.1) {
+      # Save row to table
+      km_sig_hits <- rbind(km_sig_hits, data.frame(
+        CANCER_TYPE = tumor_type,
+        Arm = arm,
+        Comparison = comparison,
+        CoxP = signif(cox_p, 3),
+        KMP = signif(km_p, 3)
+      ))
+
+      # KM plot
+      fit <- survfit(surv_obj ~ CNVstatus, data = subset)
+      p <- ggsurvplot(fit, data = subset,
+                      pval = TRUE,
+                      risk.table = TRUE,
+                      palette = c("#D64045", "grey20"),
+                      title = paste(tumor_type, arm, comparison, "vs None – PD-1/PDL-1"),
+                      xlab = "Survival Time (months)",
+                      ylab = "Survival probability",
+                      risk.table.height = 0.25,
+                      break.time.by = 20,
+                      ggtheme = theme_classic(base_size = 14))
+
+      # Save plot
+      filename <- paste0(output_dir, "/", gsub(" ", "_", tumor_type), "_", arm, "_", comparison, "_PD1.pdf")
+      ggsave(filename, plot = p$plot, width = 7, height = 5)
+    }
+  }
+}
+
+# Optional: View summary of significant dual-p hits
+km_sig_hits
+```
+
+
+# survival analysis for all arms
+```{r}
+library(survival)
+library(dplyr)
+
+# Define arm-level columns
+arm_cols <- grep("^Arm", names(df_cyto), value = TRUE)
+
+# Initialize output data frames
+results_arm_cancer_type <- data.frame()
+results_arm_oncotree <- data.frame()
+
+### 3a. Loop by CANCER_TYPE
+for (tumor in unique(df_cyto$CANCER_TYPE)) {
+  tumor_data <- df_cyto %>% filter(CANCER_TYPE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(arm) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c("None", comparison))) %>%
+        filter(!is.na(OS), !is.na(OS_MONTHS))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+
+        # Try Cox
+        fit <- tryCatch(coxph(surv_obj ~ CNV, data = subset), error = function(e) NULL)
+        if (is.null(fit)) next
+
+        cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+        if (length(cnv_term) != 1) next
+
+        hr <- exp(coef(fit)[cnv_term])
+        ci <- round(exp(confint(fit)[cnv_term, ]), 3)
+        cox_p <- summary(fit)$coefficients[cnv_term, "Pr(>|z|)"]
+
+        # Try log-rank
+        logrank_p <- tryCatch({
+          sdiff <- survdiff(surv_obj ~ CNV, data = subset)
+          1 - pchisq(sdiff$chisq, df = 1)
+        }, error = function(e) NA)
+
+        results_arm_cancer_type <- rbind(results_arm_cancer_type, data.frame(
+          CANCER_TYPE = tumor,
+          Arm = arm,
+          Comparison = comparison,
+          HR = round(hr, 3),
+          log2HR = log2(hr),
+          CI = paste(ci[1], ci[2], sep = " - "),
+          CoxP = signif(cox_p, 3),
+          LogRankP = signif(logrank_p, 3),
+          N = nrow(subset)
+        ))
+      }
+    }
+  }
+}
+
+### 3b. Loop by ONCOTREE_CODE
+for (code in unique(df_cyto$ONCOTREE_CODE)) {
+  tumor_data <- df_cyto %>% filter(ONCOTREE_CODE == code, DRUG_TYPE == "PD-1/PDL-1")
+
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(arm) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c("None", comparison))) %>%
+        filter(!is.na(OS), !is.na(OS_MONTHS))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+
+        # Try Cox
+        fit <- tryCatch(coxph(surv_obj ~ CNV, data = subset), error = function(e) NULL)
+        if (is.null(fit)) next
+
+        cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+        if (length(cnv_term) != 1) next
+
+        hr <- exp(coef(fit)[cnv_term])
+        ci <- round(exp(confint(fit)[cnv_term, ]), 3)
+        cox_p <- summary(fit)$coefficients[cnv_term, "Pr(>|z|)"]
+
+        # Try log-rank
+        logrank_p <- tryCatch({
+          sdiff <- survdiff(surv_obj ~ CNV, data = subset)
+          1 - pchisq(sdiff$chisq, df = 1)
+        }, error = function(e) NA)
+
+        results_arm_oncotree <- rbind(results_arm_oncotree, data.frame(
+          ONCOTREE_CODE = code,
+          Arm = arm,
+          Comparison = comparison,
+          HR = round(hr, 3),
+          log2HR = log2(hr),
+          CI = paste(ci[1], ci[2], sep = " - "),
+          CoxP = signif(cox_p, 3),
+          LogRankP = signif(logrank_p, 3),
+          N = nrow(subset)
+        ))
+      }
+    }
+  }
+}
+
+# Save both results
+write.csv(results_arm_cancer_type, "ArmLevel_Survival_CancerType.csv", row.names = FALSE)
+write.csv(results_arm_oncotree, "ArmLevel_Survival_OncoTree.csv", row.names = FALSE)
+```
+
+
+Plot by oncotree 
+```{r}
+# Output directory
+output_dir <- "KM_plots_PD1_oncotree"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Store results
+km_sig_hits_oncotree <- data.frame()
+
+# Get arm columns
+arm_cols <- grep("^Arm", names(df), value = TRUE)
+
+# Loop by ONCOTREE_CODE × arm × Gain/Loss
+for (oncocode in unique(df$ONCOTREE_CODE)) {
+  tumor_data <- df %>% filter(ONCOTREE_CODE == oncocode, DRUG_TYPE == "PD-1/PDL-1")
+
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+
+      subset <- tumor_data %>%
+        filter(!!sym(arm) %in% c("None", comparison)) %>%
+        mutate(CNVstatus = factor(!!sym(arm), levels = c(comparison, "None")))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNVstatus)) == 2) {
+
+        # Cox model
+        fit <- tryCatch(coxph(Surv(OS_MONTHS, OS) ~ CNVstatus, data = subset), error = function(e) NULL)
+        if (is.null(fit)) next
+
+        cox_p <- summary(fit)$coefficients["CNVstatusNone", "Pr(>|z|)"]
+
+        # Log-rank
+        surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+        km_p <- tryCatch({
+          surv_diff <- survdiff(surv_obj ~ CNVstatus, data = subset)
+          1 - pchisq(surv_diff$chisq, df = 1)
+        }, error = function(e) NA)
+
+        if (!is.na(km_p) && cox_p < 0.05 && km_p < 0.1) {
+          km_sig_hits_oncotree <- rbind(km_sig_hits_oncotree, data.frame(
+            ONCOTREE_CODE = oncocode,
+            Arm = arm,
+            Comparison = comparison,
+            CoxP = signif(cox_p, 3),
+            LogRankP = signif(km_p, 3),
+            N = nrow(subset)
+          ))
+
+          # KM plot
+          surv_fit <- survfit(surv_obj ~ CNVstatus, data = subset)
+          p <- ggsurvplot(surv_fit, data = subset,
+                          pval = TRUE,
+                          risk.table = TRUE,
+                          palette = c("#D64045", "grey20"),
+                          title = paste(oncocode, arm, comparison, "vs None – PD-1/PDL-1"),
+                          xlab = "Survival Time (months)",
+                          ylab = "Survival probability",
+                          risk.table.height = 0.25,
+                          break.time.by = 20,
+                          ggtheme = theme_classic(base_size = 14))
+
+          filename <- paste0(output_dir, "/", oncocode, "_", arm, "_", comparison, "_PD1.pdf")
+          ggsave(filename, plot = p$plot, width = 7, height = 5)
+        }
+      }
+    }
+  }
+}
+```
+
+# HR curve (unadjusted)
+```{r}
+results$logHR <- log2(results$HR)
+results$Event <- ifelse(grepl("Gain", results$Comparison), "Gain", "Loss")
+
+ggplot(results %>% filter(P < 0.05), aes(x = Arm, y = logHR, fill = Event)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = c("Gain" = "firebrick", "Loss" = "steelblue")) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Survival HR by Arm-level CNV",
+       y = "log2(Hazard Ratio)",
+       x = "Chromosome Arm") +
+  theme_bw()
+```
+
+** Show which chromosomal arms are associatied with higher or lower survival (via log2(HR)) across multiple tumor types. **
+### Arm 
+```{r}
+# 1. filter for tumor types of interest 
+tumors_to_plot <- c("Bladder Cancer", "Colorectal Cancer", "Non-Small Cell Lung Cancer", 
+                    "Melanoma", "Renal Cell Carcinoma", "Head and Neck Cancer")
+results_filtered <- results %>%
+  filter(CANCER_TYPE %in% tumors_to_plot, P < 0.05)
+
+# 2. calculate log2(HR) and add CNV types 
+results_filtered <- results_filtered %>%
+  mutate(
+    log2HR = log2(HR),
+    Event = ifelse(str_detect(Comparison, "Gain"), "Gain", "Loss")
+  )
+
+# 3. plot chromosomes in order 
+results_filtered$Arm <- factor(results_filtered$Arm, 
+  levels = unique(results_filtered$Arm)[order(as.numeric(gsub("[^0-9]", "", unique(results_filtered$Arm))))])
+
+# 4. Plot 
+library(ggplot2)
+
+ggplot(results_filtered, aes(x = Arm, y = log2HR, fill = Event)) +
+  geom_bar(stat = "identity", position = "identity") +
+  facet_wrap(~ CANCER_TYPE, scales = "free_x", ncol = 2) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+  labs(title = "CNV Arm-level Effects on Survival",
+       x = "Chromosomal Arm", y = "log2(Hazard Ratio)",
+       fill = "CNV Event") +
+  theme_bw() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+```{r}
+# Make sure CANCER_TYPE is in `results`
+results_all <- results %>%
+  filter(CANCER_TYPE %in% tumors_to_plot) %>%
+  mutate(
+    log2HR = log2(HR),
+    sign_logP = -log10(P) * ifelse(log2HR > 0, 1, -1),
+    Event = ifelse(str_detect(Comparison, "Gain"), "Gain", "Loss")
+  )
+
+# Order arms by chromosome number
+results_all$Arm <- factor(results_all$Arm,
+  levels = unique(results_all$Arm)[order(as.numeric(gsub("[^0-9XY]", "", unique(results_all$Arm))))])
+
+# Plot all arms
+ggplot(results_all, aes(x = Arm, y = sign_logP, fill = Event)) +
+  geom_bar(stat = "identity", position = "identity") +
+  facet_wrap(~ CANCER_TYPE, scales = "free_x", ncol = 2) +
+  geom_hline(yintercept = c(-1.3, 1.3), linetype = "dotted", color = "grey40") +
+  geom_hline(yintercept = 0, linetype = "solid") +
+  scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+  labs(
+    title = "Survival Associations by CNV Arm",
+    y = "Signed -log10(p)",         # Or change to "log2(Hazard Ratio)" if you prefer
+    x = "Chromosome Arm",
+    fill = "CNV Event"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r}
+# Create output folder
+dir.create("logHR_plots", showWarnings = FALSE)
+
+# Unique cancer types
+cancer_types <- unique(results_all$CANCER_TYPE)
+
+# Loop and plot one by one
+for (cancer in cancer_types) {
+  p <- results_all %>%
+    filter(CANCER_TYPE == cancer) %>%
+    ggplot(aes(x = Arm, y = sign_logP, fill = Event)) +
+    geom_bar(stat = "identity", position = "identity") +
+    geom_hline(yintercept = c(-1.3, 1.3), linetype = "dotted", color = "grey40") +
+    geom_hline(yintercept = 0, linetype = "solid") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    labs(
+      title = paste("Survival Associations by CNV Arm –", cancer),
+      y = "Signed -log10(p)",
+      x = "Chromosome Arm",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1),
+      plot.title = element_text(face = "bold")
+    )
+
+  # Save each as PDF
+  ggsave(
+    filename = paste0("logHR_plots/", gsub(" ", "_", cancer), "_survival_CNV_arm.pdf"),
+    plot = p, width = 8, height = 5
+  )
+}
+```
+
+## cytoband level HR 
+```{r}
+library(dplyr)
+library(stringr)
+
+# 1. Identify cytoband-level CNV columns
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+# 2. Categorize CNVs at the cytoband level
+cnv_cat_cytoband <- cnv_raw %>%
+  mutate(across(all_of(cytoband_cols), ~ case_when(
+    .x >  0.2 ~ "Gain",
+    .x < -0.2 ~ "Loss",
+    TRUE      ~ "None"
+  )))
+
+# 3. Merge sample-level metadata (including ONCOTREE and CANCER_TYPE)
+sample_info <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE)
+
+# 4. Join CNV categories to sample metadata
+merged_sample_cytoband <- merge(sample_info, cnv_cat_cytoband, by = "SAMPLE_ID")
+
+# 5. Join survival metadata (OS, OS_MONTHS)
+df_cyto <- merge(
+  clin_pt[, c("PATIENT_ID", "OS_MONTHS", "OS_STATUS")],
+  merged_sample_cytoband,
+  by = "PATIENT_ID"
+) %>%
+  mutate(
+    OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1)
+  )
+```
+
+Plot
+
+### By cancer types 
+```{r}
+# Define cancer types
+cancer_types_to_plot <- c(
+  "Bladder Cancer",
+  "Colorectal Cancer",
+  "Non-Small Cell Lung Cancer",
+  "Melanoma",
+  "Renal Cell Carcinoma",
+  "Head and Neck Cancer",
+  "Glioma",
+  "Esophagogastric Cancer",
+  "Breast Cancer"
+)
+
+# 3. Filter only tumor types of interest
+df_cyto_filtered <- df_cyto %>% filter(CANCER_TYPE %in% cancer_types_to_plot)
+
+# 4. Initialize results data frame
+results_cytoband <- data.frame()
+
+for (tumor in cancer_types_to_plot) {
+  tumor_data <- df_cyto_filtered %>% filter(CANCER_TYPE == tumor)
+
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c(comparison, "None")))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+
+          # Skip models with infinite coefficients
+          beta <- coef(fit)
+          if (any(!is.finite(beta))) next
+
+          hr <- exp(beta)
+          ci <- round(exp(confint(fit)), 3)
+          p <- summary(fit)$coefficients[5]
+
+          results_cytoband <- rbind(results_cytoband, data.frame(
+            CANCER_TYPE = tumor,
+            Cytoband = band,
+            Comparison = comparison,
+            HR = round(hr, 3),
+            log2HR = log2(hr),
+            CI = paste(ci[1], ci[2], sep = " - "),
+            P = signif(p, 3),
+            N = nrow(subset)
+          ))
+        }, error = function(e) {
+          message(paste("Skipped:", tumor, band, comparison, "-", e$message))
+        })
+      }
+    }
+  }
+}
+
+```
+
+Plot cytoband level log2(HR)
+```{r}
+
+# Add columns for plotting
+results_cytoband <- results_cytoband %>%
+  mutate(
+    Event = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    Chrom = str_extract(Cytoband, "^[0-9XY]+"),
+    ArmLabel = str_extract(Cytoband, "^[0-9XY]+[pq]")
+  )
+
+# Sort cytobands in genomic order
+cyto_levels <- results_cytoband %>%
+  distinct(Cytoband) %>%
+  mutate(order = as.numeric(gsub("[^0-9XY]", "", Cytoband))) %>%
+  arrange(order) %>%
+  pull(Cytoband)
+
+results_cytoband$Cytoband <- factor(results_cytoband$Cytoband, levels = unique(cyto_levels))
+
+# Create mapping: one cytoband per arm for label
+axis_labels <- results_cytoband %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n()/2)])
+
+# Plot cytoband-level, label by arm
+ggplot(results_cytoband, aes(x = Cytoband, y = log2HR, fill = Event)) +
+  geom_bar(stat = "identity", width = 1) +
+  facet_wrap(~ CANCER_TYPE, scales = "free_x", ncol = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+  scale_x_discrete(
+    breaks = axis_labels$Cytoband,
+    labels = axis_labels$ArmLabel
+  ) +
+  labs(
+    title = "Cytoband-level CNV Survival Associations (log2 HR)",
+    x = "Chromosome Arm (labeled)", y = "log2(Hazard Ratio)", fill = "CNV Event"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, size = 6),
+    strip.text = element_text(face = "bold", size = 10)
+  )
+```
+
+
+Plot individually 
+```{r}
+# Create output directory if it doesn't exist
+# dir.create("logHR_plots_cytoband", showWarnings = FALSE)
+
+# Extract plotting labels (once globally)
+axis_labels <- results_cytoband %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n()/2)], .groups = "drop")
+
+# Correct genomic order sorting
+cyto_levels <- results_cytoband %>%
+  mutate(
+    chr_num = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num = ifelse(is.na(chr_num), ifelse(str_detect(Cytoband, "^X"), 23, 24), chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]$")
+  ) %>%
+  arrange(chr_num, arm_suffix) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_cytoband$Cytoband <- factor(results_cytoband$Cytoband, levels = unique(cyto_levels))
+
+# Loop over each cancer type and plot individually
+for (tumor in unique(results_cytoband$CANCER_TYPE)) {
+  plot_data <- results_cytoband %>% filter(CANCER_TYPE == tumor)
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("CNV Survival Effect in ", tumor),
+      x = "Chromosome Arm (labeled)",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  # Save individual PDF
+  ggsave(
+    filename = paste0("logHR_plots_cytoband/", gsub(" ", "_", tumor), "_cytoband_logHR.pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+
+
+	•	log2(HR) > 0 → CNV increases risk of death (hazard ↑)
+	+ 0.5 = 41% higher risk 
+	+ 1 = 2x higher risk (bad prognosis)
+	•	log2(HR) < 0 → CNV decreases risk of death (hazard ↓)
+	•	log2(HR) = 0 → No effect (HR = 1)
+	
+	
+**UPDATE: filter for p value**
+```{r}
+dir.create("logHR_plots_filtered", showWarnings = FALSE)
+
+for (tumor in unique(results_cytoband$CANCER_TYPE)) {
+  plot_data <- results_cytoband %>%
+    filter(CANCER_TYPE == tumor, P < 0.05)  # filter for p value 
+
+  if (nrow(plot_data) == 0) next  # skip if no significant results
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("Significant CNV Survival Effects in ", tumor),
+      x = "Chromosome",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_filtered/", gsub(" ", "_", tumor), ".pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+
+### Plot by oncotree 
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(survival)
+
+# Step 1: Define ONCOTREE_CODEs of interest: based on > 30 counts 
+oncotree_codes_to_plot <- c("LUAD", "SKCM", "CCRCC", "BLCA", "GBM", "COAD", "LUSC",
+                            "MUP", "UTUC", "IDC", "STAD", "OPHSC", "ESCA", "UM", "HNSC")
+
+# Step 2: Filter data
+df_cyto_filtered <- df_cyto %>% filter(ONCOTREE_CODE %in% oncotree_codes_to_plot)
+
+# Step 3: Run Cox regression by ONCOTREE and cytoband
+results_cytoband <- data.frame()
+
+for (code in oncotree_codes_to_plot) {
+  tumor_data <- df_cyto_filtered %>% filter(ONCOTREE_CODE == code)
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c(comparison, "None")))
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+          beta <- coef(fit)
+          if (any(!is.finite(beta))) next
+          hr <- exp(beta)
+          ci <- round(exp(confint(fit)), 3)
+          p <- summary(fit)$coefficients[5]
+          results_cytoband <- rbind(results_cytoband, data.frame(
+            ONCOTREE_CODE = code,
+            Cytoband = band,
+            Comparison = comparison,
+            HR = round(hr, 3),
+            log2HR = log2(hr),
+            CI = paste(ci[1], ci[2], sep = " - "),
+            P = signif(p, 3),
+            N = nrow(subset)
+          ))
+        }, error = function(e) {
+          message(paste("Skipped:", code, band, comparison, "-", e$message))
+        })
+      }
+    }
+  }
+}
+
+# Step 4: Add plotting columns
+results_cytoband <- results_cytoband %>%
+  mutate(
+    Event = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    Chrom = str_extract(Cytoband, "^[0-9XY]+"),
+    ArmLabel = str_extract(Cytoband, "^[0-9XY]+[pq]")
+  )
+
+# Step 5: Genomic ordering
+cyto_levels <- results_cytoband %>%
+  mutate(
+    chr_num = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num = ifelse(is.na(chr_num), ifelse(str_detect(Cytoband, "^X"), 23, 24), chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]$")
+  ) %>%
+  arrange(chr_num, arm_suffix) %>%
+  pull(Cytoband) %>%
+  unique()
+results_cytoband$Cytoband <- factor(results_cytoband$Cytoband, levels = cyto_levels)
+
+# Step 6: Create label mapping (1 cytoband per arm)
+axis_labels <- results_cytoband %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n() / 2)], .groups = "drop")
+
+# Step 7: Make folder and plot individually
+dir.create("logHR_plots_cytoband_oncotree", showWarnings = FALSE)
+
+for (tumor in unique(results_cytoband$ONCOTREE_CODE)) {
+  plot_data <- results_cytoband %>% filter(ONCOTREE_CODE == tumor)
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("CNV Survival Effect in ", tumor),
+      x = "Chromosome Arm (labeled)",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_cytoband_oncotree/", tumor, "_cytoband_logHR.pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+
+```
+
+
+# HR curve with co-variates: purity & aneuploidy 
+
+## assess whether the covariate has impact
+```{r}
+# Example for Arm1q Gain vs None
+subset <- df %>%
+  filter(CANCER_TYPE == "Melanoma",
+         DRUG_TYPE == "PD-1/PDL-1",
+         Arm1q %in% c("Gain", "None")) %>%
+  mutate(CNV = factor(Arm1q, levels = c("Gain", "None"))) %>%
+  left_join(aneuploidy_cytoband, by = "SAMPLE_ID")
+
+# Test if aneuploidy differs by CNV status
+wilcox.test(AneuploidyScore ~ CNV, data = subset)
+
+# Same for purity
+wilcox.test(clin_smp$TUMOR_PURITY[match(subset$SAMPLE_ID, clin_smp$SAMPLE_ID)] ~ subset$CNV)
+
+```
+
+Cytoband aneuploidy 
+
+```{r}
+# Calculate aneuploidy score for cytoband 
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+aneuploidy_cytoband <- cnv_raw %>%
+  select(SAMPLE_ID, all_of(cytoband_cols)) %>%
+  mutate(AneuploidyScore = rowSums(abs(across(all_of(cytoband_cols))), na.rm = TRUE)) %>%
+  select(SAMPLE_ID, AneuploidyScore)
+
+
+# merge into df
+df$SAMPLE_ID <- as.character(df$SAMPLE_ID)
+aneuploidy_cytoband$SAMPLE_ID <- as.character(aneuploidy_cytoband$SAMPLE_ID)
+
+df <- df %>%
+  left_join(aneuploidy_cytoband, by = "SAMPLE_ID")
+
+# confirm if column is present
+colnames(df)
+```
+
+```{r}
+library(survival)
+library(dplyr)
+
+arm_cols <- grep("^Arm", names(df), value = TRUE)
+confounded_tumors <- c()
+
+for (tumor in unique(df$CANCER_TYPE)) {
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+
+      subset <- df %>%
+        filter(CANCER_TYPE == tumor,
+               DRUG_TYPE == "PD-1/PDL-1",
+               !!sym(arm) %in% c("None", comparison),
+               !is.na(AneuploidyScore),
+               !is.na(OS),
+               !is.na(OS_MONTHS)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c(comparison, "None")))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        p1 <- wilcox.test(AneuploidyScore ~ CNV, data = subset)$p.value
+        p2 <- summary(coxph(Surv(OS_MONTHS, OS) ~ AneuploidyScore, data = subset))$coefficients[,"Pr(>|z|)"]
+
+        if (p1 < 0.05 && p2 < 0.05) {
+          confounded_tumors <- c(confounded_tumors, tumor)
+          break
+        }
+      }
+    }
+  }
+}
+
+unique(confounded_tumors)
+```
+
+arm-level 
+```{r}
+library(dplyr)
+library(survival)
+
+# 1. Get all Arm columns
+arm_cols <- grep("^Arm", names(df), value = TRUE)
+
+# 2. Store output
+confounded_results <- data.frame()
+
+# 3. Loop through tumor × arm × Gain/Loss
+for (tumor in unique(df$CANCER_TYPE)) {
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+
+      subset <- df %>%
+        filter(CANCER_TYPE == tumor,
+               DRUG_TYPE == "PD-1/PDL-1",
+               !!sym(arm) %in% c("None", comparison),
+               !is.na(AneuploidyScore),
+               !is.na(OS_MONTHS),
+               !is.na(OS)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c(comparison, "None")))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        # 1. CNV ~ Aneuploidy
+        p1 <- wilcox.test(AneuploidyScore ~ CNV, data = subset)$p.value
+
+        # 2. Aneuploidy ~ Survival
+        p2 <- summary(coxph(Surv(OS_MONTHS, OS) ~ AneuploidyScore, data = subset))$coefficients[,"Pr(>|z|)"]
+
+        # If both significant, record as confounded
+        if (p1 < 0.05 && p2 < 0.05) {
+          confounded_results <- rbind(confounded_results, data.frame(
+            Tumor = tumor,
+            Arm = arm,
+            Comparison = comparison,
+            P_CNV_vs_Aneuploidy = signif(p1, 3),
+            P_Aneuploidy_vs_Surv = signif(p2, 3)
+          ))
+        }
+      }
+    }
+  }
+}
+
+# 4. Just show it — no saving, no files, no nonsense
+confounded_results
+```
+
+
+test tumor purity 
+```{r}
+library(dplyr)
+library(survival)
+
+# 1. Get all Arm columns
+arm_cols <- grep("^Arm", names(df_cyto), value = TRUE)
+
+# 2. Store output
+purity_confounded_results <- data.frame()
+
+# 3. Loop through tumor × arm × Gain/Loss
+for (tumor in unique(df_cyto$CANCER_TYPE)) {
+  for (arm in arm_cols) {
+    for (comparison in c("Gain", "Loss")) {
+
+      subset <- df_cyto %>%
+        filter(CANCER_TYPE == tumor,
+               DRUG_TYPE == "PD-1/PDL-1",
+               !!sym(arm) %in% c("None", comparison),
+               !is.na(TUMOR_PURITY),
+               !is.na(OS_MONTHS),
+               !is.na(OS)) %>%
+        mutate(CNV = factor(!!sym(arm), levels = c(comparison, "None")))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        # 1. CNV status associated with purity?
+        p1 <- wilcox.test(TUMOR_PURITY ~ CNV, data = subset)$p.value
+
+        # 2. Purity associated with survival?
+        p2 <- summary(coxph(Surv(OS_MONTHS, OS) ~ TUMOR_PURITY, data = subset))$coefficients[, "Pr(>|z|)"]
+
+        if (p1 < 0.05 && p2 < 0.05) {
+          purity_confounded_results <- rbind(purity_confounded_results, data.frame(
+            Tumor = tumor,
+            Arm = arm,
+            Comparison = comparison,
+            P_CNV_vs_Purity = signif(p1, 3),
+            P_Purity_vs_Surv = signif(p2, 3)
+          ))
+        }
+      }
+    }
+  }
+}
+
+# 4. View the results
+purity_confounded_results
+```
+
+## calcualte the covariate 
+```{r}
+# aneuploidy score 
+# Identify cytoband-level columns
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+# Compute absolute CNV value sum across all cytobands (per sample)
+aneuploidy_cytoband <- cnv_raw %>%
+  select(SAMPLE_ID, all_of(cytoband_cols)) %>%
+  mutate(AneuploidyScore = rowSums(abs(across(all_of(cytoband_cols))), na.rm = TRUE)) %>%
+  select(SAMPLE_ID, AneuploidyScore)
+```
+
+```{r}
+# Summary of cleaned purity values
+summary(clin_smp$TUMOR_PURITY)
+
+# Count how many are not missing
+sum(!is.na(clin_smp$TUMOR_PURITY))
+```
+
+## merge 
+
+```{r}
+# Merge tumor purity and aneuploidy score with sample metadata
+sample_info_extended <- clin_smp %>%
+  select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, TUMOR_PURITY) %>%
+  left_join(aneuploidy_cytoband, by = "SAMPLE_ID")
+
+# Merge with categorized CNV cytobands
+merged_sample_cytoband <- merge(sample_info_extended, cnv_cat_cytoband, by = "SAMPLE_ID")
+
+# Merge with patient-level survival info
+df_cyto <- merge(
+  clin_pt[, c("PATIENT_ID", "OS_MONTHS", "OS_STATUS")],
+  merged_sample_cytoband,
+  by = "PATIENT_ID"
+) %>%
+  mutate(
+    OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1)
+  )
+```
+
+
+```{r}
+# check if df_cyto contains all cytobands
+colnames(df_cyto)[grep("^[0-9XY]+[pq]", colnames(df_cyto))]
+```
+
+## update Cox model to include both covariates 
+
+### cancer type 
+```{r}
+results_cytoband <- data.frame()
+
+for (tumor in cancer_types_to_plot) {
+  tumor_data <- df_cyto %>% filter(CANCER_TYPE == tumor)
+
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c(comparison, "None"))) %>%
+        filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore, data = subset) # include the 2 covariates 
+
+          # Dynamically find CNV coefficient (either CNVGain or CNVLoss)
+          cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+          if (length(cnv_term) != 1) next  # skip if CNV coefficient not found
+
+          hr <- exp(coef(fit)[cnv_term])
+          ci <- round(exp(confint(fit)[cnv_term, ]), 3)
+          p <- summary(fit)$coefficients[cnv_term, 5]
+
+          results_cytoband <- rbind(results_cytoband, data.frame(
+            CANCER_TYPE = tumor,
+            Cytoband = band,
+            Comparison = comparison,
+            HR = round(hr, 3),
+            log2HR = log2(hr),
+            CI = paste(ci[1], ci[2], sep = " - "),
+            P = signif(p, 3),
+            N = nrow(subset)
+          ))
+        }, error = function(e) {
+          message(paste("Skipped:", tumor, band, comparison, "-", e$message))
+        })
+      }
+    }
+  }
+}
+```
+
+check 
+```{r}
+dim(results_cytoband)
+head(results_cytoband)
+summary(results_cytoband$log2HR)
+```
+
+## Plot
+```{r}
+# Label cytobands by arm (to avoid crowding)
+results_cytoband <- results_cytoband %>%
+  mutate(
+    Event = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    Chrom = str_extract(Cytoband, "^[0-9XY]+"),
+    ArmLabel = str_extract(Cytoband, "^[0-9XY]+[pq]")
+  )
+
+# Order cytobands by chromosome
+cyto_levels <- results_cytoband %>%
+  mutate(
+    chr_num = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num = ifelse(is.na(chr_num), ifelse(str_detect(Cytoband, "^X"), 23, 24), chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]$")
+  ) %>%
+  arrange(chr_num, arm_suffix) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_cytoband$Cytoband <- factor(results_cytoband$Cytoband, levels = cyto_levels)
+
+# Choose a label for each arm to avoid overcrowding
+axis_labels <- results_cytoband %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n() / 2)], .groups = "drop")
+
+# Create output folder
+dir.create("logHR_plots_adjusted", showWarnings = FALSE)
+
+# Loop over each cancer type and generate plots
+for (tumor in unique(results_cytoband$CANCER_TYPE)) {
+  plot_data <- results_cytoband %>% filter(CANCER_TYPE == tumor)
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("Adjusted CNV Survival Effects in ", tumor),
+      x = "Chromosome",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_adjusted/", gsub(" ", "_", tumor), "_logHR_adjusted.pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+
+
+
+### oncotree code
+```{r}
+# define oncotree IDs
+oncotree_codes_to_plot <- c("LUAD", "SKCM", "CCRCC", "BLCA", "GBM", "COAD", "LUSC",
+                            "MUP", "UTUC", "IDC", "STAD", "OPHSC", "ESCA", "UM", "HNSC")
+
+# run adjusted Cox models again, this time stratify by oncotree code 
+results_cytoband <- data.frame()
+
+for (code in oncotree_codes_to_plot) {
+  tumor_data <- df_cyto %>% filter(ONCOTREE_CODE == code)
+
+  for (band in cytoband_cols) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c(comparison, "None"))) %>%
+        filter(!is.na(TUMOR_PURITY), !is.na(AneuploidyScore))
+
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV + TUMOR_PURITY + AneuploidyScore, data = subset)
+          cnv_term <- grep("^CNV", names(coef(fit)), value = TRUE)
+          if (length(cnv_term) != 1) next
+
+          hr <- exp(coef(fit)[cnv_term])
+          ci <- round(exp(confint(fit)[cnv_term, ]), 3)
+          p <- summary(fit)$coefficients[cnv_term, 5]
+
+          results_cytoband <- rbind(results_cytoband, data.frame(
+            ONCOTREE_CODE = code,
+            Cytoband = band,
+            Comparison = comparison,
+            HR = round(hr, 3),
+            log2HR = log2(hr),
+            CI = paste(ci[1], ci[2], sep = " - "),
+            P = signif(p, 3),
+            N = nrow(subset)
+          ))
+        }, error = function(e) {
+          message(paste("Skipped:", code, band, comparison, "-", e$message))
+        })
+      }
+    }
+  }
+}
+```
+
+```{r}
+## Plot by oncotree code 
+# Format for plotting
+results_cytoband <- results_cytoband %>%
+  mutate(
+    Event = ifelse(Comparison == "Gain", "Gain", "Loss"),
+    Chrom = str_extract(Cytoband, "^[0-9XY]+"),
+    ArmLabel = str_extract(Cytoband, "^[0-9XY]+[pq]")
+  )
+
+# Order cytobands for x-axis
+cyto_levels <- results_cytoband %>%
+  mutate(
+    chr_num = as.numeric(str_extract(Cytoband, "^[0-9]+")),
+    chr_num = ifelse(is.na(chr_num), ifelse(str_detect(Cytoband, "^X"), 23, 24), chr_num),
+    arm_suffix = str_extract(Cytoband, "[pq]$")
+  ) %>%
+  arrange(chr_num, arm_suffix) %>%
+  pull(Cytoband) %>%
+  unique()
+
+results_cytoband$Cytoband <- factor(results_cytoband$Cytoband, levels = cyto_levels)
+
+# Label 1 cytoband per arm
+axis_labels <- results_cytoband %>%
+  group_by(ArmLabel) %>%
+  summarise(Cytoband = Cytoband[ceiling(n()/2)], .groups = "drop")
+
+# Save individual plots
+dir.create("logHR_plots_adjusted_oncotree", showWarnings = FALSE)
+
+for (tumor in unique(results_cytoband$ONCOTREE_CODE)) {
+  plot_data <- results_cytoband %>% filter(ONCOTREE_CODE == tumor)
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("Adjusted CNV Survival Effects in ", tumor),
+      x = "Chromosome",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_adjusted_oncotree/", tumor, "_logHR_adjusted.pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+
+```{r}
+# compare adjusted vs undajsuted
+results_cytoband$Model <- "Adjusted"
+results_cytoband_unadj$Model <- "Unadjusted"
+
+combined <- bind_rows(results_cytoband_unadj, results_cytoband)
+
+ggplot(combined, aes(x = Cytoband, y = log2HR, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ CANCER_TYPE, scales = "free_x") +
+  theme_bw()
+```
+
+
+### filter for p value and account for aneuploidy score only if it confounds 
+```{r}
+for (tumor in unique(results_cytoband$CANCER_TYPE)) {
+  plot_data <- results_cytoband %>%
+    filter(CANCER_TYPE == tumor, P < 0.05)  # filter for p value 
+
+  if (nrow(plot_data) == 0) next  # skip if no significant results
+
+  p <- ggplot(plot_data, aes(x = Cytoband, y = log2HR, fill = Event)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_fill_manual(values = c("Gain" = "#D64045", "Loss" = "#375E97")) +
+    scale_x_discrete(
+      breaks = axis_labels$Cytoband,
+      labels = axis_labels$ArmLabel
+    ) +
+    labs(
+      title = paste0("Significant CNV Survival Effects in ", tumor),
+      x = "Chromosome",
+      y = "log2(Hazard Ratio)",
+      fill = "CNV Event"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 6),
+      plot.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    filename = paste0("logHR_plots_filtered/", gsub(" ", "_", tumor), ".pdf"),
+    plot = p, width = 10, height = 4
+  )
+}
+```
+

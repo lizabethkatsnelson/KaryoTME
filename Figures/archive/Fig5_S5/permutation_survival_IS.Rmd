@@ -1,0 +1,702 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+ 
+
+```{r}
+# Load packages
+library(tidyverse)
+
+
+# Load data
+immune_df <- read.csv("results_immune_allTumors.csv")
+survival_df <- read.csv("results_survival.csv")
+
+# Merge on cancer type, cytoband, and CNV status
+merged_df <- inner_join(immune_df, survival_df,
+                        by = c("OncoTree", "Cytoband", "Comparison"))
+
+# Remove any rows with missing values in key columns
+merged_df <- merged_df %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Compute observed Spearman correlation
+observed_corr <- cor(merged_df$ImmuneEffect, 
+                     merged_df$sign_logP_survival, 
+                     method = "spearman")
+```
+
+# set up for survival 
+
+```{r}
+# Generate survival results using ONCOTREE_CODE to match immune data
+cytoband_cols_df <- grep("^[0-9XY]+[pq]", names(df), value = TRUE)
+results_survival <- data.frame()
+
+for (tumor in unique(df$ONCOTREE_CODE)) {  # Use ONCOTREE_CODE not CANCER_TYPE
+  tumor_data <- df %>% filter(ONCOTREE_CODE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+  
+  for (band in cytoband_cols_df) {
+    for (comparison in c("Gain", "Loss")) {
+      subset <- tumor_data %>%
+        filter(!!sym(band) %in% c("None", comparison)) %>%
+        mutate(CNV = factor(!!sym(band), levels = c("None", comparison)))
+      
+      if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+        tryCatch({
+          fit <- coxph(Surv(OS_MONTHS, OS) ~ CNV, data = subset)
+          hr <- exp(coef(fit))
+          p <- summary(fit)$coefficients[5]
+          
+          results_survival <- rbind(results_survival, data.frame(
+            OncoTree = tumor,  # Match naming with immune data
+            Cytoband = band,
+            Comparison = comparison,
+            HR = round(hr, 3),
+            P_survival = p,
+            log2HR = log2(hr),
+            sign_logP_survival = -log10(p) * ifelse(log2(hr) > 0, 1, -1),
+            N = nrow(subset)
+          ))
+        }, error = function(e){})
+      }
+    }
+  }
+}
+
+
+write.csv(results_survival, "results_survival.csv", row.names = FALSE)
+
+```
+
+
+# Permutation test
+Ask if the osberved correlation is stronger than expected by chanc e
+- element-wise subtraction 
+- merge immune and survival data per cytoband, so each row corresponds to a specific cytoband-tumor comparison combination 
+- calcluate correlation across all cytobands using paired values 
+
+```{r}
+
+# Permutation test
+set.seed(42)
+
+# shuffles the survival values, breaking the matching between immune & survival 
+# recalculates the Spearman correlation 1000x 
+# null distribution of correlation values that would happen by random chance 
+# p value = count how many times the random correlation was as extreme as your real one 
+n_perm <- 1000
+perm_corrs <- replicate(n_perm, {
+  shuffled <- sample(merged_df$sign_logP_survival)
+  cor(merged_df$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# Compute p-value (two-sided)
+p_value <- mean(abs(perm_corrs) >= abs(observed_corr))
+
+# Print results
+cat("Observed correlation:", round(observed_corr, 3), "\n")
+cat("Permutation p-value:", p_value, "\n")
+
+# Plot the null distribution
+hist(perm_corrs, breaks = 40, col = "gold", border = "black",
+     main = paste0("Permutation Test\nObserved corr = ", 
+                   round(observed_corr, 3), ", p = ", signif(p_value, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_corr, col = "red", lwd = 2, lty = 2)
+```
+- very weak but significant inverse correlation between poor survival and immune suprresion (“CNVs associated with immune suppression tend to also show slightly worse survival)
+- permuetated 1000 times
+
+
+Pearson correlation 
+```{r}
+# Compute observed Pearson correlation
+observed_pearson <- cor(merged_df$ImmuneEffect, 
+                        merged_df$sign_logP_survival, 
+                        method = "pearson")
+
+# Permutation test
+set.seed(42)
+perm_pearson <- replicate(1000, {
+  shuffled <- sample(merged_df$sign_logP_survival)
+  cor(merged_df$ImmuneEffect, shuffled, method = "pearson")
+})
+
+# Calculate p-value
+p_pearson <- mean(abs(perm_pearson) >= abs(observed_pearson))
+
+# Output results
+cat("Observed Pearson correlation:", round(observed_pearson, 3), "\n")
+cat("Permutation p-value:", p_pearson, "\n")
+
+# Optional: plot null distribution
+hist(perm_pearson, breaks = 30, col = "skyblue", main = paste0(
+  "Permutation Test (Pearson)\nObserved = ", round(observed_pearson, 3),
+  ", p = ", signif(p_pearson, 3)),
+  xlab = "Pearson Correlation (permuted)"
+)
+abline(v = observed_pearson, col = "red", lty = 2, lwd = 2)
+```
+
+# cosine similarity 
+```{r}
+# Cosine similarity = dot(A, B) / (||A|| * ||B||)
+cosine_similarity <- function(a, b) {
+  sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+}
+
+# Compute observed cosine similarity
+observed_cos <- cosine_similarity(merged_df$ImmuneEffect, merged_df$sign_logP_survival)
+
+# Permutation test (same as before)
+perm_cos <- replicate(1000, {
+  shuffled <- sample(merged_df$sign_logP_survival)
+  cosine_similarity(merged_df$ImmuneEffect, shuffled)
+})
+
+# p-value
+p_cos <- mean(abs(perm_cos) >= abs(observed_cos))
+p_cos
+```
+
+# SKCM 
+```{r}
+# Filter to BLCA only, and remove NAs
+skcm_df <- merged_df %>%
+  filter(OncoTree == "SKCM") %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation across cytobands
+observed_r <- cor(skcm_df$ImmuneEffect, skcm_df$sign_logP_survival, method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_r <- replicate(1000, {
+  cor(skcm_df$ImmuneEffect, sample(skcm_df$sign_logP_survival), method = "spearman")
+})
+
+# P-value
+p_val <- mean(abs(perm_r) >= abs(observed_r))
+
+# Output
+cat("SKCM — Spearman:", round(observed_r, 3), "p-value:", p_val, "\n")
+hist(perm_r, breaks = 30, col = "orange",
+     main = paste0("SKCMT — Spearman = ", round(observed_r, 3), ", p = ", signif(p_val, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_r, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Filter merged data for SKCM and 1q or 9p cytobands
+merged_skcm_1q9p <- merged_df %>%
+  filter(OncoTree == "SKCM", grepl("^1q|^9p", Cytoband))
+
+# Remove NAs
+merged_skcm_1q9p <- merged_skcm_1q9p %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Rerun Spearman 
+observed_spearman <- cor(merged_skcm_1q9p$ImmuneEffect,
+                         merged_skcm_1q9p$sign_logP_survival,
+                         method = "spearman")
+
+# Step 2: Permutation test
+set.seed(42)
+perm_spearman <- replicate(1000, {
+  shuffled <- sample(merged_skcm_1q9p$sign_logP_survival)
+  cor(merged_skcm_1q9p$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# Step 3: Compute permutation p-value
+p_spearman <- mean(abs(perm_spearman) >= abs(observed_spearman))
+
+# Step 4: Print results
+cat("Observed Spearman correlation:", round(observed_spearman, 3), "\n")
+cat("Permutation p-value:", p_spearman, "\n")
+
+# Optional: plot null distribution
+hist(perm_spearman, breaks = 30, col = "gold",
+     main = paste0("Permutation Test (Spearman) — SKCM 1q/9p\nObserved = ", 
+                   round(observed_spearman, 3), ", p = ", signif(p_spearman, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_spearman, col = "red", lty = 2, lwd = 2)
+```
+ - strong inverse relationship: CNVs linked to lower immune infiltration also tend to predict worse survival in melanoma.
+ 
+```{r}
+# Filter for SKCM and 1q cytobands
+merged_skcm_1q <- merged_df %>%
+  filter(OncoTree == "SKCM", grepl("^1q", Cytoband)) %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation
+observed_1q <- cor(merged_skcm_1q$ImmuneEffect,
+                   merged_skcm_1q$sign_logP_survival,
+                   method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_1q <- replicate(1000, {
+  shuffled <- sample(merged_skcm_1q$sign_logP_survival)
+  cor(merged_skcm_1q$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# Compute p-value
+p_1q <- mean(abs(perm_1q) >= abs(observed_1q))
+
+# Output
+cat("SKCM 1q — Spearman:", round(observed_1q, 3), "p-value:", p_1q, "\n")
+hist(perm_1q, breaks = 30, col = "gold",
+     main = paste0("SKCM 1q — Spearman = ", round(observed_1q, 3), ", p = ", signif(p_1q, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_1q, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Filter for SKCM and 9p cytobands
+merged_skcm_9p <- merged_df %>%
+  filter(OncoTree == "SKCM", grepl("^9p", Cytoband)) %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation
+observed_9p <- cor(merged_skcm_9p$ImmuneEffect,
+                   merged_skcm_9p$sign_logP_survival,
+                   method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_9p <- replicate(1000, {
+  shuffled <- sample(merged_skcm_9p$sign_logP_survival)
+  cor(merged_skcm_9p$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# Compute p-value
+p_9p <- mean(abs(perm_9p) >= abs(observed_9p))
+
+# Output
+cat("SKCM 9p — Spearman:", round(observed_9p, 3), "p-value:", p_9p, "\n")
+hist(perm_9p, breaks = 30, col = "gold",
+     main = paste0("SKCM 9p — Spearman = ", round(observed_9p, 3), ", p = ", signif(p_9p, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_9p, col = "red", lty = 2, lwd = 2)
+```
+
+# Bladder
+all cytobands
+```{r}
+# Filter to BLCA only, and remove NAs
+blca_df <- merged_df %>%
+  filter(OncoTree == "BLCA") %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation across cytobands
+observed_r <- cor(blca_df$ImmuneEffect, blca_df$sign_logP_survival, method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_r <- replicate(1000, {
+  cor(blca_df$ImmuneEffect, sample(blca_df$sign_logP_survival), method = "spearman")
+})
+
+# P-value
+p_val <- mean(abs(perm_r) >= abs(observed_r))
+
+# Output
+cat("BLCA — Spearman:", round(observed_r, 3), "p-value:", p_val, "\n")
+hist(perm_r, breaks = 30, col = "orange",
+     main = paste0("BLCA — Spearman = ", round(observed_r, 3), ", p = ", signif(p_val, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_r, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Filter for BLCA + 9q only
+merged_blca_9q <- merged_df %>%
+  filter(OncoTree == "BLCA", grepl("^9q", Cytoband)) %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation
+observed_9q <- cor(merged_blca_9q$ImmuneEffect, merged_blca_9q$sign_logP_survival, method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_9q <- replicate(1000, {
+  shuffled <- sample(merged_blca_9q$sign_logP_survival)
+  cor(merged_blca_9q$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# p-value
+p_9q <- mean(abs(perm_9q) >= abs(observed_9q))
+
+# Output + plot
+cat("BLCA 9q — Spearman:", round(observed_9q, 3), "p-value:", p_9q, "\n")
+hist(perm_9q, breaks = 30, col = "orange",
+     main = paste0("BLCA 9q — Spearman = ", round(observed_9q, 3), ", p = ", signif(p_9q, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_9q, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Filter for BLCA + 11p only
+merged_blca_11p <- merged_df %>%
+  filter(OncoTree == "BLCA", grepl("^11p", Cytoband)) %>%
+  filter(!is.na(ImmuneEffect), !is.na(sign_logP_survival))
+
+# Spearman correlation
+observed_11p <- cor(merged_blca_11p$ImmuneEffect, merged_blca_11p$sign_logP_survival, method = "spearman")
+
+# Permutation test
+set.seed(42)
+perm_11p <- replicate(1000, {
+  shuffled <- sample(merged_blca_11p$sign_logP_survival)
+  cor(merged_blca_11p$ImmuneEffect, shuffled, method = "spearman")
+})
+
+# p-value
+p_11p <- mean(abs(perm_11p) >= abs(observed_11p))
+
+# Output + plot
+cat("BLCA 11p — Spearman:", round(observed_11p, 3), "p-value:", p_11p, "\n")
+hist(perm_11p, breaks = 30, col = "orange",
+     main = paste0("BLCA 11p — Spearman = ", round(observed_11p, 3), ", p = ", signif(p_11p, 3)),
+     xlab = "Spearman Correlation (permuted)")
+abline(v = observed_11p, col = "red", lty = 2, lwd = 2)
+```
+ 
+# Correlation plot 
+```{r}
+# Merge on OncoTree, Cytoband, Comparison
+merged_df <- inner_join(immune_df, survival_df,
+                        by = c("OncoTree", "Cytoband", "Comparison"))
+
+# Compute flipped signed -log10(p) for immune and survival
+# NOTE: Immune sign is flipped to align with survival (so negative immune becomes positive)
+merged_df <- merged_df %>%
+  mutate(
+    sign_logP_immune = -1 * (-log10(P_immune) * sign(ImmuneEffect)), # flip sign 
+    sign_logP_surv   = -log10(P_survival) * sign(log2HR)
+  ) %>%
+  filter(!is.na(sign_logP_immune), !is.na(sign_logP_surv))
+
+# Format p-value display
+format_p <- function(p) {
+  ifelse(p < 0.001, "< 0.001", signif(p, 2))
+}
+
+# Compute Spearman correlation
+cor_val <- cor(merged_df$sign_logP_immune, merged_df$sign_logP_surv, method = "spearman")
+p_val <- cor.test(merged_df$sign_logP_immune, merged_df$sign_logP_surv, method = "spearman")$p.value
+
+# Plot correlation
+ggplot(merged_df, aes(x = sign_logP_immune, y = sign_logP_surv)) +
+  geom_point(alpha = 0.7, color = "#4F6DB8") +
+  geom_smooth(method = "lm", color = "darkred", se = FALSE, linetype = "dashed") +
+  labs(
+    title = "Immune vs Survival Association Across Cytobands",
+    subtitle = paste0("Spearman rho = ", round(cor_val, 3), ", p ", format_p(p_val)),
+    x = "Immune Score (signed -log10(p))",
+    y = "Survival  (signed -log10(p))"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+# Tumor-specific correlation plots
+tumors <- c("SKCM", "LUAD", "BLCA", "COAD", "HNSC")
+
+for (tumor in tumors) {
+  df_tumor <- merged_df %>% filter(OncoTree == tumor)
+  
+  cor_val <- cor(df_tumor$sign_logP_immune, df_tumor$sign_logP_surv, method = "spearman")
+  p_val <- cor.test(df_tumor$sign_logP_immune, df_tumor$sign_logP_surv, method = "spearman")$p.value
+  
+  p <- ggplot(df_tumor, aes(x = sign_logP_immune, y = sign_logP_surv)) +
+    geom_point(alpha = 0.7, color = "#4F6DB8") +
+    geom_smooth(method = "lm", se = FALSE, color = "darkred", linetype = "dashed") +
+    labs(
+      title = paste(tumor, "Immune vs Survival Association"),
+      subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                        ", p = ", format_p(p_val)),
+      x = "Immune Score (signed -log10(p))",
+      y = "Survival (signed -log10(p))"
+    ) +
+    theme_minimal(base_size = 13)
+  
+  print(p)
+}
+```
+
+```{r}
+# Tumor-specific correlation plots with cytoband labels on top right
+library(ggrepel)
+
+tumors <- c("SKCM", "LUAD", "BLCA")
+
+for (tumor in tumors) {
+  df_tumor <- merged_df %>% filter(OncoTree == tumor)
+  
+  # Calculate Spearman correlation
+  cor_val <- cor(df_tumor$sign_logP_immune, df_tumor$sign_logP_surv, method = "spearman")
+  p_val <- cor.test(df_tumor$sign_logP_immune, df_tumor$sign_logP_surv, method = "spearman")$p.value
+  
+  # Get top 5 cytobands near top-right (strongest joint positive associations)
+  df_tumor <- df_tumor %>%
+    mutate(distance = sqrt(sign_logP_immune^2 + sign_logP_surv^2)) %>%
+    arrange(desc(sign_logP_immune + sign_logP_surv))  # prioritize top right corner
+  
+  top_cytobands <- df_tumor %>%
+    slice_max(order_by = sign_logP_immune + sign_logP_surv, n = 10)
+  
+  # Plot
+  p <- ggplot(df_tumor, aes(x = sign_logP_immune, y = sign_logP_surv)) +
+    geom_point(alpha = 0.7, color = "#4F6DB8") +
+    geom_text_repel(data = top_cytobands, aes(label = Cytoband),
+                    size = 3.5, color = "black", max.overlaps = Inf) +
+    geom_smooth(method = "lm", se = FALSE, color = "darkred", linetype = "dashed") +
+    labs(
+      title = paste(tumor, "Immune vs Survival Association"),
+      subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                        ", p = ", ifelse(p_val < 0.001, "< 0.001", signif(p_val, 2))),
+      x = "Immune Score (signed -log10(p))",
+      y = "Survival (signed -log10(p))"
+    ) +
+    theme_minimal(base_size = 13)
+  
+  print(p)
+}
+```
+For each tumor type, separate gain and losses 
+make color proportional to strength of correlation (gradient) --> grey to blue to for losses and grey to red for gains 
+```{r}
+tumors <- c("SKCM", "BLCA", "LUAD")
+
+for (tumor in tumors) {
+  df_tumor <- merged_df %>%
+    filter(OncoTree == tumor,
+           is.finite(ImmuneEffect),
+           is.finite(sign_logP_survival))
+
+  for (comparison in c("Gain", "Loss")) {
+    df_sub <- df_tumor %>%
+      filter(Comparison == comparison) %>%
+      mutate(signal_strength = abs(ImmuneEffect + sign_logP_survival))
+
+    if (nrow(df_sub) < 5) next
+
+    cor_val <- cor(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")
+    p_val  <- cor.test(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")$p.value
+
+    color_gradient <- if (comparison == "Gain") {
+      scale_color_gradient(low = "grey80", high = "#EA6A6A")
+    } else {
+      scale_color_gradient(low = "grey80", high = "#4F6DB8")
+    }
+
+    p <- ggplot(df_sub, aes(x = ImmuneEffect, y = sign_logP_survival, color = signal_strength)) +
+      geom_point(size = 3, alpha = 0.85) +
+      geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+      color_gradient +
+      labs(
+        title = paste(tumor, "-", comparison),
+        subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                          ", p = ", ifelse(p_val < 0.001, "< 0.001", signif(p_val, 2))),
+        x = "Immune Score (signed -log10(p))",
+        y = "Survival Score (signed -log10(p))",
+        color = "Signal Strength"
+      ) +
+      theme_minimal(base_size = 13)
+
+    print(p)
+  }
+}
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+tumors <- c("SKCM", "BLCA", "LUAD")
+
+for (tumor in tumors) {
+  
+  df_tumor <- merged_df %>%
+    filter(OncoTree == tumor,
+           is.finite(ImmuneEffect),
+           is.finite(sign_logP_survival))
+  
+  for (comparison in c("Gain", "Loss")) {
+    
+    df_sub <- df_tumor %>%
+      filter(Comparison == comparison) %>%
+      mutate(signal_strength = abs(ImmuneEffect) + abs(sign_logP_survival))
+    
+    if (nrow(df_sub) < 5) next
+    
+    cor_val <- cor(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")
+    p_val  <- cor.test(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")$p.value
+    
+    top_labels <- df_sub %>%
+      slice_max(order_by = signal_strength, n = 10)
+    
+    color_gradient <- if (comparison == "Gain") {
+      scale_color_gradient(low = "grey80", high = "#EA6A6A")
+    } else {
+      scale_color_gradient(low = "grey80", high = "#4F6DB8")
+    }
+    
+    p <- ggplot(df_sub, aes(x = ImmuneEffect,
+                            y = sign_logP_survival,
+                            color = signal_strength)) +
+      geom_point(size = 3, alpha = 0.85) +
+      geom_text_repel(data = top_labels, aes(label = Cytoband),
+                      color = "black", size = 3.5, max.overlaps = Inf) +
+      geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+      color_gradient +
+      labs(
+        title = paste(tumor, "-", comparison),
+        subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                          ", p = ", ifelse(p_val < 0.001, "< 0.001", signif(p_val, 2))),
+        x = "Immune Score",
+        y = "Survival Score (signed -log10(p))",
+        color = "Signal Strength"
+      ) +
+      theme_minimal(base_size = 13)
+    
+    print(p)
+  }
+}
+```
+```{r}
+# save all plots to 1 pdf
+# Save all plots to one PDF file
+pdf("immune_survival_correlation_plots.pdf", width = 8, height = 6)
+
+# Your existing plotting code starts here
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+tumors <- c("SKCM", "BLCA", "LUAD")
+
+for (tumor in tumors) {
+  
+  df_tumor <- merged_df %>%
+    filter(OncoTree == tumor,
+           is.finite(ImmuneEffect),
+           is.finite(sign_logP_survival))
+  
+  for (comparison in c("Gain", "Loss")) {
+    
+    df_sub <- df_tumor %>%
+      filter(Comparison == comparison) %>%
+      mutate(signal_strength = abs(ImmuneEffect) + abs(sign_logP_survival))
+    
+    if (nrow(df_sub) < 5) next
+    
+    cor_val <- cor(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")
+    p_val  <- cor.test(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")$p.value
+    
+    top_labels <- df_sub %>%
+      slice_max(order_by = signal_strength, n = 10)
+    
+    color_gradient <- if (comparison == "Gain") {
+      scale_color_gradient(low = "grey80", high = "#EA6A6A")
+    } else {
+      scale_color_gradient(low = "grey80", high = "#4F6DB8")
+    }
+    
+    p <- ggplot(df_sub, aes(x = ImmuneEffect,
+                            y = sign_logP_survival,
+                            color = signal_strength)) +
+      geom_point(size = 3, alpha = 0.85) +
+      geom_text_repel(data = top_labels, aes(label = Cytoband),
+                      color = "black", size = 3.5, max.overlaps = Inf) +
+      geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+      color_gradient +
+      labs(
+        title = paste(tumor, "-", comparison),
+        subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                          ", p = ", ifelse(p_val < 0.001, "< 0.001", signif(p_val, 2))),
+        x = "Immune Score",
+        y = "Survival Score (signed -log10(p))",
+        color = "Signal Strength"
+      ) +
+      theme_minimal(base_size = 13)
+    
+    print(p)  # This sends the plot to the PDF
+  }
+}
+
+# Close the PDF file
+dev.off()
+```
+
+```{r}
+# save all plots to 1 pdf
+# Save all plots to one PDF file
+pdf("immune_survival_COAD_HNSC.pdf", width = 8, height = 6)
+
+# Your existing plotting code starts here
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+tumors <- c("COAD", "HNSC")
+
+for (tumor in tumors) {
+  
+  df_tumor <- merged_df %>%
+    filter(OncoTree == tumor,
+           is.finite(ImmuneEffect),
+           is.finite(sign_logP_survival))
+  
+  for (comparison in c("Gain", "Loss")) {
+    
+    df_sub <- df_tumor %>%
+      filter(Comparison == comparison) %>%
+      mutate(signal_strength = abs(ImmuneEffect) + abs(sign_logP_survival))
+    
+    if (nrow(df_sub) < 5) next
+    
+    cor_val <- cor(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")
+    p_val  <- cor.test(df_sub$ImmuneEffect, df_sub$sign_logP_survival, method = "spearman")$p.value
+    
+    top_labels <- df_sub %>%
+      slice_max(order_by = signal_strength, n = 10)
+    
+    color_gradient <- if (comparison == "Gain") {
+      scale_color_gradient(low = "grey80", high = "#EA6A6A")
+    } else {
+      scale_color_gradient(low = "grey80", high = "#4F6DB8")
+    }
+    
+    p <- ggplot(df_sub, aes(x = ImmuneEffect,
+                            y = sign_logP_survival,
+                            color = signal_strength)) +
+      geom_point(size = 3, alpha = 0.85) +
+      geom_text_repel(data = top_labels, aes(label = Cytoband),
+                      color = "black", size = 3.5, max.overlaps = Inf) +
+      geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+      color_gradient +
+      labs(
+        title = paste(tumor, "-", comparison),
+        subtitle = paste0("Spearman ρ = ", round(cor_val, 3),
+                          ", p = ", ifelse(p_val < 0.001, "< 0.001", signif(p_val, 2))),
+        x = "Immune Score",
+        y = "Survival Score (signed -log10(p))",
+        color = "Signal Strength"
+      ) +
+      theme_minimal(base_size = 13)
+    
+    print(p)  # This sends the plot to the PDF
+  }
+}
+
+# Close the PDF file
+dev.off()
+```
+

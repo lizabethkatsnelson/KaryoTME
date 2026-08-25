@@ -1,0 +1,395 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+# arm level gain 
+# HNSC 1q gain 
+## CNV (TCGA+ CPTAC)
+```{r}
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+names(tcga) # confirms what is inside 
+
+tcga_hnsc <- tcga[["HNSC.HPVneg_ArmCNV"]]  # Use HPV– subset
+
+# Create TCGA 1q gain label file with consistent columns
+tcga_labels <- data.frame(
+  Patient_ID = paste0(rownames(tcga_hnsc), "-tumor"),
+  Tumor = "HNSC",
+  Arm_1q_Gain = ifelse(tcga_hnsc$Arm1q > 0.2, 1, 0)
+)
+
+tcga_labels
+```
+
+
+
+```{r}
+cptac <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation/CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", 
+                  row.names = 1, check.names = FALSE)
+head(cptac)
+unique(cptac$TumorType)
+```
+
+```{r}
+
+# Filter only HNSCC rows
+cptac_hnsc <- cptac[cptac$TumorType == "HNSCC", ]
+
+# Convert rownames (patient IDs) to a column
+cptac_hnsc <- rownames_to_column(cptac_hnsc, "Patient_ID")
+cptac_hnsc
+
+# Generate label file: binary 1q gain
+cptac_labels <- cptac_hnsc %>%
+  mutate(
+    Tumor = "HNSC",
+    Arm_1q_Gain = ifelse(Arm_1q > 0.2, 1, 0)
+  ) %>%
+  select(Patient_ID, Tumor, Arm_1q_Gain)
+
+# Check it
+cptac_labels
+
+```
+
+
+```{r}
+# ==== Combine CPTAC + TCGA ====
+# Combine TCGA and CPTAC
+combined_labels <- bind_rows(cptac_labels, tcga_labels)
+
+# Preview
+combined_labels
+
+# Save to file
+write.csv(combined_labels, "combined_HNSC_Arm1qGain_labels.csv", row.names = FALSE)
+```
+
+# Tile 
+Check match with tile 
+```{r}
+library(tidyverse)
+
+# Load
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/image_analysis")
+tiles <- read.csv("all_tiles.csv")
+labels <- read.csv("combined_HNSC_Arm1qGain_labels.csv")
+
+
+# Check match
+intersect_ids <- intersect(unique(tiles$Patient_ID), labels$Patient_ID)
+
+length(intersect_ids)       # number of matched patients
+length(unique(tiles$Patient_ID))  # total in all_tiles
+length(labels$Patient_ID)   # total in label file
+```
+
+Filter to only matched
+
+## Match 
+```{r}
+tiles_filtered <- tiles %>% filter(Patient_ID %in% labels$Patient_ID)
+write.csv(tiles_filtered, "all_tiles_1qgain_filtered.csv", row.names = FALSE)
+```
+
+
+## aneuplody patient
+```{r}
+tcga_hnsc <- tcga[["HNSC.HPVneg_ArmCNV"]]
+
+# Compute aneuploidy
+tcga_hnsc$Aneuploidy_Score <- apply(tcga_hnsc, 1, function(x) sum(abs(x) > 0.2, na.rm = TRUE))
+tcga_hnsc$Patient_ID <- paste0(rownames(tcga_hnsc), "-tumor")
+
+# Subset 9p loss (< -0.2) vs neutral (≥ -0.2)
+tcga_9p_loss <- tcga_hnsc[tcga_hnsc$Arm9p < -0.2, ]
+tcga_9p_neutral <- tcga_hnsc[tcga_hnsc$Arm9p >= -0.2, ]
+
+# Find most aneuploid in each group
+tcga_top_9p_loss <- tcga_9p_loss[which.max(tcga_9p_loss$Aneuploidy_Score), "Patient_ID"]
+tcga_top_9p_neutral <- tcga_9p_neutral[which.max(tcga_9p_neutral$Aneuploidy_Score), "Patient_ID"]
+
+cat("TCGA HNSC.HPVneg most aneuploid 9p loss patient:", tcga_top_9p_loss, "\n")
+cat("TCGA HNSC.HPVneg most aneuploid 9p neutral patient:", tcga_top_9p_neutral, "\n")
+```
+
+```{r}
+# Top 3 most aneuploid TCGA 9p loss patients
+tcga_top3_9p_loss <- tcga_9p_loss[order(-tcga_9p_loss$Aneuploidy_Score), ]
+top3_loss_ids <- head(tcga_top3_9p_loss$Patient_ID, 3)
+
+cat("Top 3 TCGA HNSC.HPVneg 9p loss patients:\n")
+print(top3_loss_ids)
+```
+
+```{r}
+# Load CPTAC
+cptac <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation/CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", 
+                  row.names = 1, check.names = FALSE)
+
+# Filter HNSCC
+library(tibble)
+cptac_hnsc <- cptac[cptac$TumorType == "HNSCC", ]
+cptac_hnsc <- rownames_to_column(cptac_hnsc, "Patient_ID")
+
+# Compute aneuploidy score
+cptac_hnsc$Aneuploidy_Score <- apply(
+  cptac_hnsc[, !(colnames(cptac_hnsc) %in% c("TumorType", "Patient_ID"))],
+  1,
+  function(x) sum(abs(x) > 0.2, na.rm = TRUE)
+)
+
+# Subset by 9p status
+cptac_9p_loss <- cptac_hnsc[cptac_hnsc$Arm_9p < -0.2, ]
+cptac_9p_neutral <- cptac_hnsc[cptac_hnsc$Arm_9p >= -0.2, ]
+
+# Most aneuploid in each group
+cptac_top_9p_loss <- cptac_9p_loss[which.max(cptac_9p_loss$Aneuploidy_Score), "Patient_ID"]
+cptac_top_9p_neutral <- cptac_9p_neutral[which.max(cptac_9p_neutral$Aneuploidy_Score), "Patient_ID"]
+
+cat("CPTAC HNSCC most aneuploid 9p loss patient:", cptac_top_9p_loss, "\n")
+cat("CPTAC HNSCC most aneuploid 9p neutral patient:", cptac_top_9p_neutral, "\n")
+```
+
+# HNSC 9p loss
+```{r}
+# --- TCGA ---
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+tcga_hnsc <- tcga[["HNSC.HPVneg_ArmCNV"]]
+
+# Create TCGA 9p loss label file
+tcga_labels_9p <- data.frame(
+  Patient_ID = paste0(rownames(tcga_hnsc), "-tumor"),
+  Tumor = "HNSC",
+  Arm_9p_Loss = ifelse(tcga_hnsc$Arm9p < -0.2, 1, 0)
+)
+```
+
+```{r}
+# --- CPTAC ---
+cptac <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation/CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", 
+                  row.names = 1, check.names = FALSE)
+
+# Filter HNSCC only
+cptac_hnsc <- cptac[cptac$TumorType == "HNSCC", ]
+cptac_hnsc <- tibble::rownames_to_column(cptac_hnsc, "Patient_ID")
+
+# Create CPTAC 9p loss labels
+cptac_labels_9p <- cptac_hnsc %>%
+  mutate(
+    Tumor = "HNSC",
+    Arm_9p_Loss = ifelse(Arm_9p < -0.2, 1, 0)
+  ) %>%
+  select(Patient_ID, Tumor, Arm_9p_Loss)
+```
+
+```{r}
+# --- Combine TCGA + CPTAC ---
+combined_labels_9p <- bind_rows(tcga_labels_9p, cptac_labels_9p)
+
+# Save to file
+write.csv(combined_labels_9p, "combined_HNSC_Arm9pLoss_labels.csv", row.names = FALSE)
+```
+
+```{r}
+tiles <- read.csv("all_tiles.csv")
+labels_9p <- read.csv("combined_HNSC_Arm9pLoss_labels.csv")
+
+# Match Patient IDs
+intersect_ids_9p <- intersect(unique(tiles$Patient_ID), labels_9p$Patient_ID)
+
+length(intersect_ids_9p)
+length(unique(tiles$Patient_ID))
+length(labels_9p$Patient_ID)
+```
+
+```{r}
+tiles_filtered_9p <- tiles %>% filter(Patient_ID %in% labels_9p$Patient_ID)
+write.csv(tiles_filtered_9p, "all_tiles_9ploss_filtered.csv", row.names = FALSE)
+```
+
+```{r}
+# check match between lisa and mine
+# Load both CSV files
+df1 <- read.csv("HNSC.HPVneg/arm9p_loss_labels.csv")
+df2 <- read.csv("HNSC.HPVneg/combined_HNSC_Arm9pLoss_labels.csv")
+
+# Check dimensions
+cat("df1 rows:", nrow(df1), "\n")
+cat("df2 rows:", nrow(df2), "\n")
+
+# Print column names
+cat("df1 columns:\n"); print(colnames(df1))
+cat("df2 columns:\n"); print(colnames(df2))
+
+# Check how many shared Patient_IDs
+shared_ids <- intersect(df1$Patient_ID, df2$Patient_ID)
+cat("Number of shared Patient_IDs:", length(shared_ids), "\n")
+
+# Show example of Patient_IDs only in df1
+only_in_df1 <- setdiff(df1$Patient_ID, df2$Patient_ID)
+cat("Patient_IDs only in df1 (first 10):\n")
+print(head(only_in_df1, 10))
+
+# Show example of Patient_IDs only in df2
+only_in_df2 <- setdiff(df2$Patient_ID, df1$Patient_ID)
+cat("Patient_IDs only in df2 (first 10):\n")
+print(head(only_in_df2, 10))
+```
+## TCGA + CPTAC separately 
+```{r}
+# --- TCGA only ---
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+tcga_hnsc <- tcga[["HNSC.HPVneg_ArmCNV"]]
+
+# 9p Loss label creation
+tcga_labels_9p <- data.frame(
+  Patient_ID = paste0(rownames(tcga_hnsc), "-tumor"),
+  Tumor = "HNSC",
+  Arm_9p_Loss = ifelse(tcga_hnsc$Arm9p < -0.2, 1, 0)676
+)
+
+write.csv(tcga_labels_9p, "tcga_HNSC_Arm9pLoss_labels.csv", row.names = FALSE)
+
+# --- CPTAC only ---
+cptac <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation/CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", row.names = 1, check.names = FALSE)
+
+# Filter to HNSCC and move rownames to column
+cptac_hnsc <- cptac[cptac$TumorType == "HNSCC", ] %>% rownames_to_column("Patient_ID")
+
+# 9p Loss label creation
+cptac_labels_9p <- cptac_hnsc %>%
+  mutate(
+    Tumor = "HNSC",
+    Arm_9p_Loss = ifelse(Arm_9p < -0.2, 1, 0)
+  ) %>%
+  select(Patient_ID, Tumor, Arm_9p_Loss)
+
+write.csv(cptac_labels_9p, "cptac_HNSC_Arm9pLoss_labels.csv", row.names = FALSE)
+```
+
+# UCEC 1q gain 
+```{r}
+# TCGA 
+tcga_ucec <- tcga[["UCEC_ArmCNV"]]  # Use correct key
+
+tcga_labels <- data.frame(
+  Patient_ID = paste0(rownames(tcga_ucec), "-tumor"),
+  Tumor = "UCEC",
+  Arm_1q_Gain = ifelse(tcga_ucec$Arm1q > 0.2, 1, 0)
+)
+
+# CPTAC
+cptac_ucec <- cptac[cptac$TumorType == "UCEC", ]
+cptac_ucec <- rownames_to_column(cptac_ucec, "Patient_ID")
+
+cptac_labels <- cptac_ucec %>%
+  mutate(
+    Tumor = "UCEC",
+    Arm_1q_Gain = ifelse(Arm_1q > 0.2, 1, 0)
+  ) %>%
+  select(Patient_ID, Tumor, Arm_1q_Gain)
+
+# Combine 
+combined_labels <- bind_rows(cptac_labels, tcga_labels)
+write.csv(combined_labels, "combined_UCEC_Arm1qGain_labels.csv", row.names = FALSE)
+```
+
+```{r}
+# Load the two CSV files
+df1 <- read.csv("UCEC/arm1q_labels.csv", stringsAsFactors = FALSE)
+df2 <- read.csv("UCEC/combined_UCEC_Arm1qGain_labels.csv", stringsAsFactors = FALSE)
+
+# Check the number of rows in each
+cat("df1 rows:", nrow(df1), "\n")
+cat("df2 rows:", nrow(df2), "\n")
+
+# Check column names
+cat("df1 columns:\n"); print(colnames(df1))
+cat("df2 columns:\n"); print(colnames(df2))
+
+# Compare Patient_IDs
+shared_ids <- intersect(df1$Patient_ID, df2$Patient_ID)
+only_in_df1 <- setdiff(df1$Patient_ID, df2$Patient_ID)
+only_in_df2 <- setdiff(df2$Patient_ID, df1$Patient_ID)
+
+# Print results
+cat("Number of shared Patient_IDs:", length(shared_ids), "\n")
+cat("Patient_IDs only in df1 (first 10):\n"); print(head(only_in_df1, 10))
+cat("Patient_IDs only in df2 (first 10):\n"); print(head(only_in_df2, 10))
+```
+
+
+
+```{r}
+# Match tiles
+tiles <- read.csv("UCEC/tiles.csv")
+labels <- read.csv("UCEC/combined_UCEC_Arm1qGain_labels.csv")
+
+# Check overlap
+intersect_ids <- intersect(unique(tiles$Patient_ID), labels$Patient_ID)
+length(intersect_ids)       # matched
+length(unique(tiles$Patient_ID))  # in tiles
+length(labels$Patient_ID)         # in label file
+
+# Filter
+#tiles_filtered <- tiles %>% filter(Patient_ID %in% labels$Patient_ID)
+#write.csv(tiles_filtered, "all_tiles_UCEC_1qgain_filtered.csv", row.names = FALSE)
+```
+
+```{r}
+# Match tiles
+tiles <- read.csv("UCEC/tiles.csv")
+labels <- read.csv("UCEC/arm1q_labels.csv")
+
+# Check overlap
+intersect_ids <- intersect(unique(tiles$Patient_ID), labels$Patient_ID)
+length(intersect_ids)       # matched
+length(unique(tiles$Patient_ID))  # in tiles
+length(labels$Patient_ID)         # in label file
+
+```
+
+## most aneuploid patient
+```{r}
+# === TCGA UCEC ===
+tcga_ucec <- tcga[["UCEC_ArmCNV"]]
+tcga_ucec$Aneuploidy_Score <- apply(tcga_ucec, 1, function(x) sum(abs(x) > 0.2, na.rm = TRUE))
+tcga_ucec$Patient_ID <- paste0(rownames(tcga_ucec), "-tumor")
+
+# Split by 1q gain status
+tcga_1qgain     <- tcga_ucec[tcga_ucec$Arm1q > 0.2, ]
+tcga_not_1qgain <- tcga_ucec[tcga_ucec$Arm1q <= 0.2, ]
+
+# Return both
+most_aneuploid_tcga_gain    <- tcga_1qgain[which.max(tcga_1qgain$Aneuploidy_Score), "Patient_ID"]
+most_aneuploid_tcga_no_gain <- tcga_not_1qgain[which.max(tcga_not_1qgain$Aneuploidy_Score), "Patient_ID"]
+
+cat("TCGA most aneuploid UCEC with 1q gain: ", most_aneuploid_tcga_gain, "\n")
+cat("TCGA most aneuploid UCEC without 1q gain: ", most_aneuploid_tcga_no_gain, "\n")
+```
+
+```{r}
+# === CPTAC UCEC ===
+cptac_ucec <- cptac[cptac$TumorType == "UCEC", ]
+cptac_ucec <- tibble::rownames_to_column(cptac_ucec, "Patient_ID")
+
+# Compute aneuploidy score (exclude TumorType and Patient_ID)
+cptac_ucec$Aneuploidy_Score <- apply(
+  cptac_ucec[, !(colnames(cptac_ucec) %in% c("TumorType", "Patient_ID"))],
+  1,
+  function(x) sum(abs(x) > 0.2, na.rm = TRUE)
+)
+
+# Split by 1q gain
+cptac_1qgain     <- cptac_ucec[cptac_ucec$Arm_1q > 0.2, ]
+cptac_not_1qgain <- cptac_ucec[cptac_ucec$Arm_1q <= 0.2, ]
+
+# Return both
+most_aneuploid_cptac_gain    <- cptac_1qgain[which.max(cptac_1qgain$Aneuploidy_Score), "Patient_ID"]
+most_aneuploid_cptac_no_gain <- cptac_not_1qgain[which.max(cptac_not_1qgain$Aneuploidy_Score), "Patient_ID"]
+
+cat("CPTAC most aneuploid UCEC with 1q gain: ", most_aneuploid_cptac_gain, "\n")
+cat("CPTAC most aneuploid UCEC without 1q gain: ", most_aneuploid_cptac_no_gain, "\n")
+```
+

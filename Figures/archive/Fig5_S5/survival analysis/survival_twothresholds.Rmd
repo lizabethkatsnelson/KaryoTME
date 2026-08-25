@@ -1,0 +1,182 @@
+---
+title: "survival_twothresholds"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(survival)
+library(survminer)
+
+# ===== 1. Load input files =====
+clin_pt  <- read.delim("data_clinical_patient.txt", skip = 4, check.names = FALSE)
+clin_smp <- read.delim("data_clinical_sample.txt", skip = 4, check.names = FALSE)
+cnv_raw  <- read.delim("all_cnv_table.txt", check.names = FALSE, quote = "\"") %>%
+  tibble::rownames_to_column("SAMPLE_ID")
+
+clin_smp$SAMPLE_ID <- as.character(clin_smp$SAMPLE_ID)
+cnv_raw$SAMPLE_ID  <- as.character(cnv_raw$SAMPLE_ID)
+
+cytoband_cols <- grep("^[0-9XY]+[pq]", names(cnv_raw), value = TRUE)
+
+# ===== 2. Define a function to process + analyze given a threshold =====
+run_survival_at_threshold <- function(threshold, label) {
+  message("Running for threshold = ", threshold)
+  
+  cnv_cat <- cnv_raw %>%
+    mutate(across(all_of(cytoband_cols), ~ case_when(
+      .x >  threshold  ~ "Gain",
+      .x < -threshold  ~ "Loss",
+      TRUE             ~ "None"
+    )))
+  
+  # Merge clinical/sample info
+  sample_info <- clin_smp %>%
+    select(SAMPLE_ID, PATIENT_ID, CANCER_TYPE, ONCOTREE_CODE, SAMPLE_TYPE)
+  
+  merged_sample <- sample_info %>%
+    left_join(cnv_cat, by = "SAMPLE_ID")
+  
+  df <- clin_pt %>%
+    select(PATIENT_ID, OS_MONTHS, OS_STATUS, SEX, DRUG_TYPE) %>%
+    left_join(merged_sample, by = "PATIENT_ID") %>%
+    mutate(OS = if_else(str_detect(OS_STATUS, "LIVING"), 0, 1))
+  
+  # ===== 3. Cytoband-level survival analysis =====
+  km_sig_hits <- data.frame()
+  
+  for (tumor in unique(df$CANCER_TYPE)) {
+    tumor_data <- df %>% filter(CANCER_TYPE == tumor, DRUG_TYPE == "PD-1/PDL-1")
+    
+    for (band in cytoband_cols) {
+      for (comparison in c("Gain", "Loss")) {
+        subset <- tumor_data %>%
+          filter(!!sym(band) %in% c("None", comparison)) %>%
+          mutate(CNV = factor(!!sym(band), levels = c(comparison, "None")))
+        
+        if (nrow(subset) >= 10 && length(unique(subset$CNV)) == 2) {
+          surv_obj <- Surv(subset$OS_MONTHS, subset$OS)
+          surv_diff <- survdiff(surv_obj ~ CNV, data = subset)
+          km_p <- 1 - pchisq(surv_diff$chisq, df = 1)
+          
+          if (km_p < 0.1) {
+            km_sig_hits <- rbind(km_sig_hits, data.frame(
+              CANCER_TYPE = tumor,
+              Cytoband = band,
+              Comparison = comparison,
+              KMP = signif(km_p, 3),
+              N = nrow(subset),
+              Threshold = threshold
+            ))
+          }
+        }
+      }
+    }
+  }
+  
+  write.csv(km_sig_hits, paste0("significant_survival_cytobands_", label, ".csv"), row.names = FALSE)
+  return(df)
+}
+
+# ===== 4. Run both thresholds =====
+df_0.3 <- run_survival_at_threshold(0.3, "0.3")
+df_0.2 <- run_survival_at_threshold(0.2, "0.2")
+```
+
+
+1q41 gain in melanoma  at both thresholds 
+```{r}
+library(ggplot2)
+library(dplyr)
+library(survival)
+library(survminer)
+library(gridExtra)
+
+plot_1q41_SKCM <- function(df, label) {
+  skcm <- df %>% filter(CANCER_TYPE == "Melanoma", DRUG_TYPE == "PD-1/PDL-1")
+  
+  subset_1q41 <- skcm %>%
+    filter(`1q41` %in% c("None", "Gain")) %>%
+    mutate(CNVstatus = factor(`1q41`, levels = c("Gain", "None")))
+  
+  if (nrow(subset_1q41) >= 10 && length(unique(subset_1q41$CNVstatus)) == 2) {
+    fit <- survfit(Surv(OS_MONTHS, OS) ~ CNVstatus, data = subset_1q41)
+    p <- ggsurvplot(
+      fit, data = subset_1q41,
+      pval = TRUE,
+      risk.table = TRUE,
+      palette = c("#D64045", "grey20"),
+      title = paste("SKCM – 1q41 Gain vs None (Threshold =", label, ")"),
+      xlab = "Survival Time (months)", ylab = "Survival probability",
+      risk.table.height = 0.25,
+      break.time.by = 20,
+      ggtheme = theme_classic(base_size = 14)
+    )
+    
+    # Just print the combined plot
+    grid.arrange(p$plot, p$table, ncol = 1, heights = c(3, 1))
+  }
+}
+
+# Run
+plot_1q41_SKCM(df_0.3, "0.3")
+plot_1q41_SKCM(df_0.2, "0.2")
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggpubr)
+
+plot_1q21x_SKCM <- function(df, band, label) {
+  skcm <- df %>% filter(CANCER_TYPE == "Melanoma", DRUG_TYPE == "PD-1/PDL-1")
+  
+  subset_band <- skcm %>%
+    filter(.data[[band]] %in% c("None", "Gain")) %>%
+    mutate(CNVstatus = factor(.data[[band]], levels = c("Gain", "None")))
+  
+  if (nrow(subset_band) >= 10 && length(unique(subset_band$CNVstatus)) == 2) {
+    fit <- survfit(Surv(OS_MONTHS, OS) ~ CNVstatus, data = subset_band)
+    
+    p <- ggsurvplot(
+      fit,
+      data = subset_band,
+      pval = TRUE,
+      risk.table = TRUE,
+      palette = c("#D64045", "grey20"),
+      title = paste("SKCM –", band, "Gain vs None (Threshold =", label, ")"),
+      xlab = "Survival Time (months)",
+      ylab = "Survival probability",
+      risk.table.height = 0.25,
+      break.time.by = 20,
+      ggtheme = theme_classic(base_size = 14)
+    )
+    
+    # Arrange using ggarrange
+    combined_plot <- ggarrange(
+      p$plot, p$table,
+      ncol = 1, heights = c(3, 1),
+      align = "v"
+    )
+    
+    # Save as PNG
+    outname <- paste0("SKCM_", band, "_Gain_KM_plot_", label, ".png")
+    ggsave(filename = outname, plot = combined_plot, width = 7, height = 7, dpi = 300)
+    
+  } else {
+    message("Not enough data to plot: ", band)
+  }
+}
+
+bands <- c("1q21.1", "1q21.2", "1q21.3")
+
+for (band in bands) {
+  plot_1q21x_SKCM(df_0.3, band, "0.3")
+  plot_1q21x_SKCM(df_0.2, band, "0.2")
+}
+```
+
+
+

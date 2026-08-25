@@ -1,0 +1,313 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggsignif)
+
+data_table <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+```
+
+```{r}
+# Prepare data frame 
+COAD.MSI_is_df <- data_table$COAD.MSI_IS
+COAD.MSI_armcnv_df <- data_table$COAD.MSI_ArmCNV
+common_patients <- intersect(rownames(COAD.MSI_is_df), rownames(COAD.MSI_armcnv_df))
+COAD.MSI_is_df <- COAD.MSI_is_df[common_patients, , drop = FALSE]
+COAD.MSI_armcnv_df <- COAD.MSI_armcnv_df[common_patients, , drop = FALSE]
+```
+
+```{r}
+# Arms to plot
+arms_to_plot <- c("Arm3p", "Arm9p", "Arm12p")
+
+for (arm in arms_to_plot) {
+
+  if (!(arm %in% colnames(COAD.MSI_armcnv_df))) {
+    message(paste("Skipping", arm, "- not found in COAD.MSI_ArmCNV"))
+    next
+  }
+
+  # Assign CNV status
+  cnv_status <- case_when(
+    COAD.MSI_armcnv_df[[arm]] > 0.2  ~ "Gain",
+    COAD.MSI_armcnv_df[[arm]] < -0.2 ~ "Loss",
+    TRUE                             ~ "Neutral"
+  )
+
+  # Prepare plot data
+  plot_df <- data.frame(
+    IS = COAD.MSI_is_df$Ranked_Sum,
+    CNV_Status = factor(cnv_status, levels = c("Loss", "Neutral", "Gain"))
+  )
+
+  # Define comparisons
+  comparisons <- list(
+    c("Loss", "Neutral"),
+    c("Neutral", "Gain")
+  )
+
+  # Create the plot
+  p <- ggplot(plot_df, aes(x = CNV_Status, y = IS, fill = CNV_Status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8, width = 0.7) +
+    geom_signif(
+      comparisons = comparisons,
+      test = "wilcox.test",
+      map_signif_level = TRUE,
+      step_increase = 0.1,
+      textsize = 5
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4F6DB8", "Neutral" = "#B8B8B8", "Gain" = "#EA6A6A")) +
+    theme_minimal(base_size = 18) +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      axis.line = element_line(color = "black"),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) +
+    labs(
+      x = NULL,
+      y = "Immune Score"
+    )
+
+  # Show the plot before saving
+  print(p)
+
+  # Save plots
+  #file_base <- paste0("COAD.MSI_", arm, "_IS_RankedSum")
+  #ggsave(paste0(file_base, ".png"), plot = p, width = 4, height = 5, dpi = 300)
+  #ggsave(paste0(file_base, ".pdf"), plot = p, width = 4, height = 5, device = "pdf")
+}
+```
+
+# KIRC 
+```{r}
+############ KIRC #########
+# Prepare data frame 
+KIRC_is_df <- data_table$KIRC_IS
+KIRC_armcnv_df <- data_table$KIRC_ArmCNV
+common_patients <- intersect(rownames(KIRC_is_df), rownames(KIRC_armcnv_df))
+KIRC_is_df <- KIRC_is_df[common_patients, , drop = FALSE]
+KIRC_armcnv_df <- KIRC_armcnv_df[common_patients, , drop = FALSE]
+colnames(KIRC_armcnv_df)
+```
+
+
+```{r}
+# Arms to plot
+arms_to_plot <- c("Arm3p", "Arm14q")
+
+for (arm in arms_to_plot) {
+
+  if (!(arm %in% colnames(KIRC_armcnv_df))) {
+    message(paste("Skipping", arm, "- not found in KIRC_ArmCNV"))
+    next
+  }
+
+  # Assign CNV status
+  cnv_status <- case_when(
+    KIRC_armcnv_df[[arm]] > 0.2  ~ "Gain",
+    KIRC_armcnv_df[[arm]] < -0.2 ~ "Loss",
+    TRUE                         ~ "Neutral"
+  )
+
+  # Prepare plot data
+  plot_df <- data.frame(
+    IS = KIRC_is_df$Ranked_Sum,
+    CNV_Status = factor(cnv_status, levels = c("Loss", "Neutral", "Gain"))
+  )
+
+  # Define comparisons
+  comparisons <- list(
+    c("Loss", "Neutral"),
+    c("Neutral", "Gain")
+  )
+
+  # Create the plot
+  p <- ggplot(plot_df, aes(x = CNV_Status, y = IS, fill = CNV_Status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8, width = 0.7) +
+    geom_signif(
+      comparisons = comparisons,
+      test = "wilcox.test",
+      map_signif_level = TRUE,
+      step_increase = 0.1,
+      textsize = 5
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4F6DB8", "Neutral" = "#B8B8B8", "Gain" = "#EA6A6A")) +
+    theme_minimal(base_size = 18) +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      axis.line = element_line(color = "black"),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) +
+    labs(
+      x = NULL,
+      y = "Immune Score"
+    )
+  
+  print(p)
+  
+  # Save plots
+  file_base <- paste0("KIRC_", arm, "_IS_RankedSum")
+  #ggsave(paste0(file_base, ".png"), plot = p, width = 4, height = 5, dpi = 300)
+  ggsave(paste0(file_base, ".pdf"), plot = p, width = 4, height = 5, device = "pdf")
+}
+```
+
+```{r}
+# === KIRC Arm9p-only plot ===
+arm <- "Arm9p"
+
+if (!(arm %in% colnames(KIRC_armcnv_df))) {
+  stop(paste("Error:", arm, "not found in KIRC_ArmCNV"))
+}
+
+# Assign CNV status
+cnv_status <- case_when(
+  KIRC_armcnv_df[[arm]] > 0.3  ~ "Gain",
+  KIRC_armcnv_df[[arm]] < -0.3 ~ "Loss",
+  TRUE                         ~ "Neutral"
+)
+
+# Prepare plot data
+plot_df <- data.frame(
+  IS = KIRC_is_df$Ranked_Sum,
+  CNV_Status = factor(cnv_status, levels = c("Loss", "Neutral", "Gain"))
+)
+
+# Define comparisons
+comparisons <- list(
+  c("Loss", "Neutral"),
+  c("Neutral", "Gain")
+)
+
+# Create the plot
+p <- ggplot(plot_df, aes(x = CNV_Status, y = IS, fill = CNV_Status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8, width = 0.7) +
+  geom_signif(
+    comparisons = comparisons,
+    test = "wilcox.test",
+    map_signif_level = TRUE,
+    step_increase = 0.1,
+    textsize = 5
+  ) +
+  scale_fill_manual(values = c("Loss" = "#4F6DB8", "Neutral" = "#B8B8B8", "Gain" = "#EA6A6A")) +
+  theme_minimal(base_size = 18) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),
+    axis.line = element_line(color = "black"),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) +
+  labs(
+    x = NULL,
+    y = "Immune Score"
+  ) +
+  ggtitle("KIRC Arm9p")
+
+print(p)
+
+# Save plot
+ggsave("KIRC_Arm9p_IS_RankedSum.pdf", plot = p, width = 4, height = 5, device = "pdf")
+# Optional: also save PNG
+# ggsave("KIRC_Arm9p_IS_RankedSum.png", plot = p, width = 4, height = 5, dpi = 300)
+```
+
+```{r}
+# Pairwise Wilcoxon tests
+loss_vs_neutral <- wilcox.test(
+  plot_df$IS[plot_df$CNV_Status == "Loss"],
+  plot_df$IS[plot_df$CNV_Status == "Neutral"]
+)
+
+neutral_vs_gain <- wilcox.test(
+  plot_df$IS[plot_df$CNV_Status == "Neutral"],
+  plot_df$IS[plot_df$CNV_Status == "Gain"]
+)
+
+# Print results
+cat("Loss vs Neutral p-value:", loss_vs_neutral$p.value, "\n")
+cat("Neutral vs Gain p-value:", neutral_vs_gain$p.value, "\n")
+```
+
+```{r}
+# Arms to plot – now includes Arm9p
+arms_to_plot <- c("Arm1p", "Arm1q","Arm2p", "Arm2q", "Arm9p")
+
+for (arm in arms_to_plot) {
+
+  if (!(arm %in% colnames(KIRC_armcnv_df))) {
+    message(paste("Skipping", arm, "- not found in KIRC_ArmCNV"))
+    next
+  }
+
+  # Assign CNV status
+  cnv_status <- case_when(
+    KIRC_armcnv_df[[arm]] > 0.2  ~ "Gain",
+    KIRC_armcnv_df[[arm]] < -0.2 ~ "Loss",
+    TRUE                         ~ "Neutral"
+  )
+
+  # Prepare plot data
+  plot_df <- data.frame(
+    IS = KIRC_is_df$Ranked_Sum,
+    CNV_Status = factor(cnv_status, levels = c("Loss", "Neutral", "Gain"))
+  )
+
+  # Define comparisons
+  comparisons <- list(
+    c("Loss", "Neutral"),
+    c("Neutral", "Gain")
+  )
+
+  # Create the plot
+  p <- ggplot(plot_df, aes(x = CNV_Status, y = IS, fill = CNV_Status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8, width = 0.7) +
+    geom_signif(
+      comparisons = comparisons,
+      test = "wilcox.test",
+      map_signif_level = TRUE,
+      step_increase = 0.1,
+      textsize = 5
+    ) +
+    scale_fill_manual(values = c("Loss" = "#4F6DB8", "Neutral" = "#B8B8B8", "Gain" = "#EA6A6A")) +
+    theme_minimal(base_size = 18) +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      axis.line = element_line(color = "black"),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) +
+    labs(
+      x = NULL,
+      y = "Immune Score"
+    ) +
+    ggtitle(paste("KIRC", arm))  # optional: add title for clarity
+
+  print(p)
+
+  # Save plots
+  #file_base <- paste0("KIRC_", arm, "_IS_RankedSum")
+  # ggsave(paste0(file_base, ".png"), plot = p, width = 4, height = 5, dpi = 300)
+  #ggsave(paste0(file_base, ".pdf"), plot = p, width = 4, height = 5, device = "pdf")
+}
+```
+
+```{r}
+# if want to print p values on top 
+
+```
+

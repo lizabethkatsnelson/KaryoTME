@@ -1,0 +1,698 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-10-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(openxlsx)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggupset)
+library(clusterProfiler)
+library(msigdbr)
+library(org.Hs.eg.db)
+source("~/Dropbox (NYU Langone Health)/LK/_NYU_PhD/R functions/biomart_gene_locations.R") # genesdf
+
+
+### get genes per arm
+genes_per_arm <- unique(genesdf[,c("Gene", "Chromosome", "Arm")])
+genes_per_arm$Arm <- paste0(genes_per_arm$Chromosome, genes_per_arm$Arm)
+genes_per_arm$Arm <- factor(genes_per_arm$Arm, levels = unique(genes_per_arm$Arm))
+genes_per_arm <- as.data.frame(table(genes_per_arm$Arm)) %>% rename("Var1"="Chromosome_Arm", "Freq"="Genes_per_Arm")
+
+```
+
+```{r}
+### protein atlas - The blood & immune cell-specific proteome
+immunegenes <- read.csv("cell_type_category_rna_T-cells_B-cells_Plasma.tsv", sep="\t")
+# unique(immunegenes$RNA.blood.cell.specificity)
+
+immunegenes_filt <- immunegenes[!immunegenes$RNA.blood.cell.specificity %in% "Not detected in immune cells",]
+immunegenes_df <- data.frame("Gene-Symbol" = unique(c(immunegenes_filt$Gene, 
+                                                      unlist(strsplit(immunegenes_filt$Gene.synonym, split = ", ")))),
+                             "Immune_Genes" = rep("yes"), check.names = F)
+```
+
+```{r}
+### cnv frequency per gene (per tumor type)
+cnv_freq_tables <- readRDS("cnv_freq_tables.RDS")
+```
+
+
+
+```{r}
+outfile <- "All_Cancer_Analysis_L15.U90.xlsx"
+tumortypes <- excel_sheets(outfile)
+
+save_res <- list()
+# plots <- list()
+# plots_immunerm <- list()
+outlists <- list()
+plotalldf <- data.frame()
+plotalldf_immunerm <- data.frame()
+plotalldf_immunerm_del <- data.frame()
+
+for (tt in tumortypes) {
+  res <- read_excel(sheet = tt, outfile)
+  res_filt <- res[,c("Gene-Symbol","Control", "Prediction", "Random_Forest", "Chromosome.x", "Arm.x", "Full.band.x")]
+  
+  # pos and neg thresholds (mean)
+  posthresh <- unname(unlist(res_filt %>% filter(Control %in% "P") %>% summarize(mean(Random_Forest, rm.na=T)))) 
+  negthresh <- unname(unlist(res_filt %>% filter(Control %in% "N") %>% summarize(mean(Random_Forest, rm.na=T))))
+  
+  res_filt$Prediction <- ifelse(res_filt$Random_Forest > posthresh, "Positive", 
+                                ifelse(res_filt$Random_Forest < negthresh, "Negative", NA))
+  
+  fixgenes <- res_filt[is.na(res_filt$Chromosome.x), "Gene-Symbol"]
+  fixgenes <- na.omit(merge(fixgenes, 
+                            data.frame("Gene-Symbol"=genesdf$Gene_Synonym, "Chromosome"=genesdf$Chromosome, 
+                                       "Arm"=genesdf$Arm, "Cytoband"=genesdf$Cytoband, check.names=F)), by="Gene-Symbol", all.x=T)
+  fixgenes$Cytoband <- gsub(".*([a-zA-Z])", "\\1", fixgenes$Cytoband)
+  
+  res_filt <- merge(res_filt, fixgenes, by="Gene-Symbol", all.x=T)
+  res_filt$Chromosome <- ifelse(is.na(as.character(res_filt$Chromosome)), res_filt$Chromosome.x, as.character(res_filt$Chromosome))
+  res_filt$Arm <- ifelse(is.na(as.character(res_filt$Arm)), res_filt$Arm.x, as.character(res_filt$Arm))
+  res_filt$Cytoband <- ifelse(is.na(as.character(res_filt$Cytoband)), res_filt$Full.band.x, as.character(res_filt$Cytoband))
+  
+  res_filt <- res_filt[,!grepl("\\.x", colnames(res_filt))]
+  res_filt$Chromosome <- factor(res_filt$Chromosome, levels = c(paste0("Chr", 1:22), paste0("Chr", c("X", "Y"))) )
+  
+  res_filt <- merge(res_filt, immunegenes_df, by="Gene-Symbol", all.x=T) ## add immune gene annotations
+  cnvfreqdf <- cnv_freq_tables[[tt]][,c("Gene", "Gain", "Loss")] ## add gene cnv frequencies
+  colnames(cnvfreqdf) <- c("Gene-Symbol", "Amplification_Frequency", "Deletion_Frequency")
+  res_filt <- merge(res_filt, cnvfreqdf, by="Gene-Symbol", all.x=T)
+  res_filt <- unique(res_filt[order(res_filt$Chromosome),])
+  
+  colnames(res_filt)[1] <- "Gene"
+  
+  save_res[[tt]] <- res_filt
+  
+  ### only pos/neg predictions (no controls) for plotting
+  res_filt_plotting <- res_filt[!is.na(res_filt$Prediction) & res_filt$Control %in% "None" & !is.na(res_filt$Chromosome), ] %>%
+    dplyr::mutate(Chromosome_Arm = paste0(Chromosome, Arm))
+  plotdf <- dplyr::rename(as.data.frame(table(res_filt_plotting$Prediction, res_filt_plotting$Chromosome_Arm)), 
+                          Prediction=Var1, Chromosome_Arm=Var2, Count=Freq)
+  plotdf$Count <- ifelse(plotdf$Prediction == "Negative", plotdf$Count*-1, plotdf$Count) # coerce neg predictors into neg val for plot
+  plotdf$Chromosome <- factor(gsub("Chr(.*)[pq]", "\\1", as.character(plotdf$Chromosome_Arm)), levels = c(1:22, "X", "Y"))
+  plotdf$Arm <- factor(ifelse(grepl("p", plotdf$Chromosome_Arm), "p", "q"), levels = c("p", "q"))
+  plotdf$Prediction <- factor(paste0(as.character(plotdf$Prediction), "_", as.character(plotdf$Arm)), 
+                              levels = c("Positive_p", "Positive_q", "Negative_p", "Negative_q"))
+  plotdf$TumorType <- rep(tt)
+  plotdf <- plotdf[order(plotdf$Chromosome, plotdf$Arm),]
+  # p <- ggbarplot(plotdf, x="Chromosome", y="Count", fill="Prediction", xlab = "Chromosome", ylab = "Gene Count", title = tt,
+  #                color = "white", palette = c("#B74E4E", "#4a0101", "#4EB7A5", "#13473e"))
+  
+  ### remove immune genes
+  res_filt_plotting_immunerm <- res_filt_plotting[is.na(res_filt_plotting$Immune_Genes),]
+  plotdf_immunerm <- dplyr::rename(as.data.frame(table(res_filt_plotting_immunerm$Prediction,
+                                                       res_filt_plotting_immunerm$Chromosome_Arm)),Prediction=Var1, 
+                                   Chromosome_Arm=Var2, Count=Freq)
+  plotdf_immunerm$Count <- ifelse(plotdf_immunerm$Prediction == "Negative", plotdf_immunerm$Count*-1, plotdf_immunerm$Count)
+  plotdf_immunerm$Chromosome <- factor(gsub("Chr(.*)[pq]", "\\1", as.character(plotdf_immunerm$Chromosome_Arm)), 
+                                       levels = c(1:22, "X", "Y"))
+  plotdf_immunerm$Arm <- factor(ifelse(grepl("p", plotdf_immunerm$Chromosome_Arm), "p", "q"), levels = c("p", "q"))
+  plotdf_immunerm$Prediction <- factor(paste0(as.character(plotdf_immunerm$Prediction), "_", as.character(plotdf_immunerm$Arm)), 
+                              levels = c("Positive_p", "Positive_q", "Negative_p", "Negative_q"))
+  plotdf_immunerm$TumorType <- rep(tt)
+  plotdf_immunerm <- plotdf_immunerm[order(plotdf_immunerm$Chromosome, plotdf_immunerm$Arm),]
+  # p_immunerm <- ggbarplot(plotdf_immunerm, x="Chromosome", y="Count", fill="Prediction", 
+  #                         xlab = "Chromosome", ylab = "Gene Count", title = tt,
+  #                         color = "white", palette = c("#B74E4E", "#4a0101", "#4EB7A5", "#13473e"))
+  
+  #### deletion freq > 0.2
+  # if (max(res_filt_plotting_immunerm$Deletion_Frequency < 0.2)) { delfreq=0.1 } else { delfreq=0.2}
+  # print(paste0(tt, " max deletion freq = ", round(max(res_filt_plotting_immunerm$Deletion_Frequency),2)))
+  delfreq <- unname(quantile(res_filt_plotting_immunerm$Deletion_Frequency, 0.9)) # top 10% deleted genes
+  print(paste0(tt, " deletion freq cutoff = ", round(delfreq,2)))
+  res_filt_plotting_immunerm_del <- res_filt_plotting_immunerm[res_filt_plotting_immunerm$Deletion_Frequency > delfreq, ]
+  plotdf_immunerm_del <- dplyr::rename(as.data.frame(table(res_filt_plotting_immunerm_del$Prediction,
+                                                     res_filt_plotting_immunerm_del$Chromosome_Arm)),Prediction=Var1, 
+                                 Chromosome_Arm=Var2, Count=Freq)
+  plotdf_immunerm_del$Count <- ifelse(plotdf_immunerm_del$Prediction == "Negative", plotdf_immunerm_del$Count*-1,
+                                      plotdf_immunerm_del$Count)
+  plotdf_immunerm_del$Chromosome <- factor(gsub("Chr(.*)[pq]", "\\1", as.character(plotdf_immunerm_del$Chromosome_Arm)), 
+                                       levels = c(1:22, "X", "Y"))
+  plotdf_immunerm_del$Arm <- factor(ifelse(grepl("p", plotdf_immunerm_del$Chromosome_Arm), "p", "q"), levels = c("p", "q"))
+  plotdf_immunerm_del$Prediction <- factor(paste0(as.character(plotdf_immunerm_del$Prediction), "_",
+                                                  as.character(plotdf_immunerm_del$Arm)), 
+                                           levels = c("Positive_p", "Positive_q", "Negative_p", "Negative_q"))
+  plotdf_immunerm_del$TumorType <- rep(tt)
+  plotdf_immunerm_del <- plotdf_immunerm_del[order(plotdf_immunerm_del$Chromosome, plotdf_immunerm_del$Arm),]
+  # p_immunerm <- ggbarplot(plotdf_immunerm_del, x="Chromosome", y="Count", fill="Prediction", 
+  #                         xlab = "Chromosome", ylab = "Gene Count", title = tt,
+  #                         color = "white", palette = c("#B74E4E", "#4a0101", "#4EB7A5", "#13473e"))
+    
+  plotalldf <- rbind(plotalldf, plotdf)
+  plotalldf_immunerm <- rbind(plotalldf_immunerm, plotdf_immunerm)
+  plotalldf_immunerm_del <- rbind(plotalldf_immunerm_del, plotdf_immunerm_del)
+  # plots[[tt]] <- p
+  # plots_immunerm[[tt]] <- p_immunerm
+  outlists[[tt]] <- res_filt_plotting
+
+}
+# save all outputs to excel file
+# write.xlsx(save_res, file = 'Immune_Blood_Filtering/predicted_genes_RF_per_tumortype_mean_threshold.xlsx') 
+
+### plots
+plotbarplot <- function(df, x="Chromosome", y="Count", fill="Prediction", 
+                        xlab="Chromosome", ylab="Gene Count", facetby="TumorType",
+                        nrow=3, ncol=3, plotw=14, ploth=8, savepath="") {
+  
+  p = ggbarplot(df, x = x, y = y, fill = fill, 
+                xlab = xlab, ylab = ylab, lab.size = 11,
+                color = NA, palette = c("#B74E4E", "#4a0101", "#4EB7A5", "#13473e")) + theme_bw()
+  
+  pdf(paste0(savepath,".pdf"), width = plotw, height = ploth)
+  print(facet(p, facet.by = facetby, nrow = nrow, ncol = ncol, 
+              panel.labs.font = list(face = "bold", size = 12),
+              panel.labs.font.x = list(face = "bold", size = 12), 
+              panel.labs.font.y = list(face = "bold", size = 12)))
+  junk <- dev.off()
+}
+
+### plotting genes counts
+plotspath="chromosome_distribution_plots/"
+plotbarplot(df = plotalldf, savepath = paste0(plotspath, "all_predicted_gene_counts"))
+plotbarplot(df = plotalldf_immunerm, savepath = paste0(plotspath, "remove_immuneblood_genes"))
+plotbarplot(df = plotalldf_immunerm_del, savepath = paste0(plotspath, "remove_immuneblood_genes_filter_deletionfreq"))
+
+### plotting chr arm density
+plotalldf_den <- merge(plotalldf, genes_per_arm, by="Chromosome_Arm", all.x=T)
+plotalldf_den <- plotalldf_den[order(plotalldf_den$Chromosome, plotalldf_den$Arm),]
+plotalldf_den$ChrArm_Density <- plotalldf_den$Count/plotalldf_den$Genes_per_Arm
+plotbarplot(df = plotalldf_den, y="ChrArm_Density", ylab = "Predicted Gene Counts / Total Arm Gene Counts", 
+            savepath = paste0(plotspath, "all_predicted_gene_density"))
+
+plotalldf_immunerm_den <- merge(plotalldf_immunerm, genes_per_arm, by="Chromosome_Arm", all.x=T)
+plotalldf_immunerm_den <- plotalldf_immunerm_den[order(plotalldf_immunerm_den$Chromosome, plotalldf_immunerm_den$Arm),]
+plotalldf_immunerm_den$ChrArm_Density <- plotalldf_immunerm_den$Count/plotalldf_immunerm_den$Genes_per_Arm
+plotbarplot(df = plotalldf_immunerm_den, y="ChrArm_Density", ylab = "Predicted Gene Counts / Total Arm Gene Counts", 
+            savepath = paste0(plotspath, "remove_immuneblood_genes_gene_density"))
+
+
+plotalldf_immunerm_del_den <- merge(plotalldf_immunerm_del, genes_per_arm, by="Chromosome_Arm", all.x=T)
+plotalldf_immunerm_del_den <- plotalldf_immunerm_del_den[order(plotalldf_immunerm_del_den$Chromosome, plotalldf_immunerm_del_den$Arm),]
+plotalldf_immunerm_del_den$ChrArm_Density <- plotalldf_immunerm_del_den$Count/plotalldf_immunerm_del_den$Genes_per_Arm
+plotbarplot(df = plotalldf_immunerm_del_den, y="ChrArm_Density", ylab = "Predicted Gene Counts / Total Arm Gene Counts", 
+            savepath = paste0(plotspath, "remove_immuneblood_genes_filter_deletionfreq_gene_density"))
+
+
+```
+
+
+
+
+
+
+
+
+```{r}
+tumorgroups <- list("Kidney" = c("KIRC", "KIRP"), "Squamous" = c("LUSC", "HNSC"), 
+                    "GI" = c("COADREAD", "PAAD"), "Other" = c("BRCA", "LUAD", "SKCM"))
+
+### common genes in groups
+
+# get gene lists per tt
+genes_tt <- list()
+for (tt in names(outlists)) {
+  df <- outlists[[tt]]
+  pos_tt <- df[df$Prediction %in% "Positive", "Gene"]
+  neg_tt <- df[df$Prediction %in% "Negative", "Gene"]
+  genes_tt[[tt]] <- list("Pos" = pos_tt, "Neg" = neg_tt)
+}
+
+
+# get common in groups
+kidneygenes_pos <- data.frame(Gene = intersect(genes_tt$KIRC$Pos, genes_tt$KIRP$Pos), Prediction = rep("Positive"))
+kidneygenes_neg <- data.frame(Gene = intersect(genes_tt$KIRC$Neg, genes_tt$KIRP$Neg), Prediction = rep("Negative"))
+kidneygenes <- rbind(kidneygenes_pos, kidneygenes_neg)
+kidneygenes$Group <- rep("Kidney (KIRC, KIRP)")
+
+squamousgenes_pos <- data.frame(Gene = intersect(genes_tt$LUSC$Pos, genes_tt$HNSC$Pos), Prediction = rep("Positive"))
+squamousgenes_neg <- data.frame(Gene = intersect(genes_tt$LUSC$Neg, genes_tt$HNSC$Neg), Prediction = rep("Negative"))
+squamousgenes <- rbind(squamousgenes_pos, squamousgenes_neg)
+squamousgenes$Group <- rep("Squamous (LUSC, HNSC)")
+
+GIgenes_pos <- data.frame(Gene = intersect(genes_tt$COADREAD$Pos, genes_tt$PAAD$Pos), Prediction = rep("Positive"))
+GIgenes_neg <- data.frame(Gene = intersect(genes_tt$COADREAD$Neg, genes_tt$PAAD$Neg), Prediction = rep("Negative"))
+GIgenes <- rbind(GIgenes_pos, GIgenes_neg)
+GIgenes$Group <- rep("GI (COADREAD, PAAD)")
+
+othergenes_pos <- data.frame(Gene = Reduce(intersect, list(genes_tt$BRCA$Pos, genes_tt$LUAD$Pos, genes_tt$SKCM$Pos)), Prediction = rep("Positive"))
+othergenes_neg <- data.frame(Gene = Reduce(intersect, list(genes_tt$BRCA$Neg, genes_tt$LUAD$Neg, genes_tt$SKCM$Neg)), Prediction = rep("Negative"))
+othergenes <- rbind(othergenes_pos, othergenes_neg)
+othergenes$Group <- rep("Other (BRCA, LUAD, SKCM)")
+
+all_out_groups <- rbind(kidneygenes, squamousgenes, GIgenes, othergenes)
+all_out_groups <- merge(all_out_groups, save_res$BRCA[,c("Gene", "Immune_Genes", "Chromosome", "Arm", "Cytoband")], by="Gene", all.x=T)
+all_out_groups$Chromosome_Arm <- paste0(all_out_groups$Chromosome, all_out_groups$Arm)
+all_out_groups$Chromosome_Arm <- factor(all_out_groups$Chromosome_Arm, 
+                                        levels = unique(all_out_groups[order(all_out_groups$Chromosome, all_out_groups$Arm),"Chromosome_Arm"]))
+### all pos and neg predicted genes intersected across tumor types per group
+all_out_groups <- all_out_groups[order(all_out_groups$Group, all_out_groups$Prediction, all_out_groups$Chromosome, all_out_groups$Arm),]
+plotgroups <- all_out_groups %>% group_by(Group, Prediction, Chromosome_Arm) %>% count() %>% rename("n" = "Count")
+plotgroups$Prediction <- factor(ifelse(grepl("p", plotgroups$Chromosome_Arm), 
+                                       paste0(plotgroups$Prediction, "_p"), paste0(plotgroups$Prediction, "_q")), 
+                                levels = c("Positive_p", "Positive_q", "Negative_p", "Negative_q"))
+plotgroups$Count <- ifelse(grepl("Negative", plotgroups$Prediction), plotgroups$Count*-1, plotgroups$Count)
+plotgroups$Chromosome <- factor(gsub("Chr|p|q", "", plotgroups$Chromosome_Arm), 
+                                levels = unique(gsub("Chr|p|q", "", levels(plotgroups$Chromosome_Arm))))
+plotbarplot(df = plotgroups, facetby = "Group", ncol = 2, nrow = 2, plotw = 10, ploth = 6,
+            savepath = "tumortypes_clustering/gene_counts_common_per_group_chr_distribution")
+
+
+### remove immune genes
+all_out_groups_rmimmune <- all_out_groups[is.na(all_out_groups$Immune_Genes),]
+plotgroups_rmimmune <- all_out_groups_rmimmune %>% group_by(Group, Prediction, Chromosome_Arm) %>% count() %>% rename("n" = "Count")
+plotgroups_rmimmune$Prediction <- factor(ifelse(grepl("p", plotgroups_rmimmune$Chromosome_Arm), 
+                                       paste0(plotgroups_rmimmune$Prediction, "_p"), paste0(plotgroups_rmimmune$Prediction, "_q")), 
+                                levels = c("Positive_p", "Positive_q", "Negative_p", "Negative_q"))
+plotgroups_rmimmune$Count <- ifelse(grepl("Negative", plotgroups_rmimmune$Prediction), plotgroups_rmimmune$Count*-1, plotgroups_rmimmune$Count)
+plotgroups_rmimmune$Chromosome <- factor(gsub("Chr|p|q", "", plotgroups_rmimmune$Chromosome_Arm), 
+                                levels = unique(gsub("Chr|p|q", "", levels(plotgroups_rmimmune$Chromosome_Arm))))
+plotbarplot(df = plotgroups_rmimmune, facetby = "Group", ncol = 2, nrow = 2, plotw = 10, ploth = 6,
+            savepath = "tumortypes_clustering/gene_counts_common_per_group_chr_distribution_remove_immunegenes")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+####### common genes across tumor types #############
+coi <- c("Gene","Chromosome","Arm","Cytoband", "Immune_Genes", "Amplification_Frequency", "Deletion_Frequency")
+posgenes <- data.frame()
+neggenes <- data.frame()
+for (tt in names(outlists)) {
+  df <- outlists[[tt]]
+  posgenes <- rbind(posgenes, cbind(df[df$Prediction %in% "Positive", coi], TumorType=rep(tt)))
+  neggenes <- rbind(neggenes, cbind(df[df$Prediction %in% "Negative", coi], TumorType=rep(tt)))
+}
+
+### count how many times gene is picked
+posgenes_summary <- posgenes %>%
+  group_by(Gene) %>%
+  summarise(Count = n(), TumorTypes = toString(unique(TumorType)), 
+            Mean_Amplification_Frequency = mean(Amplification_Frequency, rm.na=T), Mean_Deletion_Frequency = mean(Deletion_Frequency, rm.na=T))
+posgenes_summary <- unique(merge(posgenes_summary, posgenes[,colnames(posgenes)[-c(6:8)]], by="Gene", all.x=T))
+posgenes_summary <- posgenes_summary[order(posgenes_summary$Count, decreasing = T),]
+write.csv(posgenes_summary, "prediction_outputs/positive_predicted_genes_counts.csv", row.names = F)
+
+neggenes_summary <- neggenes %>%
+  group_by(Gene) %>%
+  summarise(Count = n(),TumorTypes = toString(unique(TumorType)),
+            Mean_Amplification_Frequency = mean(Amplification_Frequency, rm.na=T), Mean_Deletion_Frequency = mean(Deletion_Frequency, rm.na=T))
+neggenes_summary <- unique(merge(neggenes_summary, neggenes[,colnames(neggenes)[-c(6:8)]], by="Gene", all.x=T))
+neggenes_summary <- neggenes_summary[order(neggenes_summary$Count, decreasing = T),]
+write.csv(neggenes_summary, "prediction_outputs/negative_predicted_genes_counts.csv", row.names = F)
+```
+
+
+```{r}
+##### density plots
+for (tt in names(save_res)) {
+  plotdf <- save_res[[tt]][,c("Gene", "Control", "Random_Forest", "Immune_Genes")]
+  plotdf$Control <- factor(ifelse(plotdf$Control == "N", "Negative", ifelse(plotdf$Control == "P", "Positive", "None")), 
+                           levels = c("None", "Negative", "Positive"))
+  p <- ggdensity(plotdf, x="Random_Forest", y = "density", color ="Control", fill = "Control", add = "mean", title = tt, 
+                 xlab = "Random Forrest Prediction", palette = c("grey", "blue", "red"), alpha = 0.5) + 
+    theme(strip.text.x = element_blank()) +
+    geom_text(data = aggregate(Random_Forest ~ Control, data = plotdf, FUN = mean), 
+              aes(x = Random_Forest, y = Inf, color = Control, label = round(Random_Forest,2)), vjust = 1)
+  pdf(paste0("density_plots/", tt, ".pdf"), width = 6, height = 4)
+  print(p)
+  junk <- dev.off()
+}
+
+```
+
+
+
+```{r pathway db's and function}
+### pathways for analysis
+## read in pathways
+go_bpdb <- unique(msigdbr(species = "human", category = "C5", subcategory = "BP") %>% dplyr::select(gs_name, human_gene_symbol))
+go_bp_gs_count <- as.data.frame(table(go_bpdb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq") # to get num genes per pathway
+
+go_ccdb <- unique(msigdbr(species = "human", category = "C5", subcategory = "CC") %>% dplyr::select(gs_name, human_gene_symbol))
+go_cc_gs_count <- as.data.frame(table(go_ccdb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq")
+
+go_mfdb <- unique(msigdbr(species = "human", category = "C5", subcategory = "MF") %>% dplyr::select(gs_name, human_gene_symbol))
+go_mf_gs_count <- as.data.frame(table(go_mfdb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq")
+
+hallmarkdb <- unique(msigdbr(species = "human", category = "H") %>% dplyr::select(gs_name, human_gene_symbol))
+hallmark_gs_count <- as.data.frame(table(hallmarkdb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq") 
+
+reactomedb <- unique(msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME") %>% dplyr::select(gs_name, human_gene_symbol))
+reactome_gs_count <- as.data.frame(table(reactomedb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq")
+
+oncdb <- unique(msigdbr(species = "human", category = "C6") %>% dplyr::select(gs_name, human_gene_symbol))
+onc_gs_count <- as.data.frame(table(oncdb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq")
+
+positionaldb <- unique(msigdbr(species = "human", category = "C1") %>% dplyr::select(gs_name, human_gene_symbol))
+positional_gs_count <- as.data.frame(table(positionaldb$gs_name)) %>% dplyr::rename(ID="Var1", Pathway_Gene_Count="Freq")
+
+chr_order <- data.frame(Pathway = unique(positionaldb$gs_name)) # chr order for plotting later
+chr_order$Chr <- factor(gsub("p.*|q.*", "", chr_order$Pathway), levels = c(paste0("chr", c(1:22, "X", "Y")), "MT") )
+chr_order$Arm <- factor(ifelse(grepl("p", chr_order$Pathway), "p", "q"), levels = c("p", "q"))
+chr_order$Band <- as.numeric(gsub(".*p|.*q", "", chr_order$Pathway))
+chr_order <- chr_order %>% group_by(Chr, Arm) %>% arrange(Arm, desc(ifelse(Arm == "p", Band, -Band)))
+chr_order <- chr_order[order(chr_order$Chr, chr_order$Arm),]
+
+pathway_dbs <- list(go_bpdb, go_ccdb, go_mfdb, hallmarkdb, reactomedb, oncdb, positionaldb) # list of databases to use for analysis
+pathway_numgenes <- list(go_bp_gs_count, go_cc_gs_count, go_mf_gs_count, hallmark_gs_count, reactome_gs_count, onc_gs_count, positional_gs_count) # list of db's and gene counts per pathways
+names(pathway_dbs) <- names(pathway_numgenes) <- c("GO_BP", "GO_CC", "GO_MF", "Hallmark", "Reactome", "Oncogenic", "Positional")
+
+# genelist=posgenes_summary[is.na(posgenes_summary$Immune_Genes) & posgenes_summary$Count >3 , "Gene"]
+run_pathway <- function(genelist) {
+  out <- list()
+  for (db in names(pathway_dbs)) {
+    print(db)
+    pathdb <- pathway_dbs[[db]] # get pathway database for this iteration
+    path_numgenes <- pathway_numgenes[[db]]
+    path_out <- enricher(gene = genelist, TERM2GENE = pathdb, pvalueCutoff = 0.01, 
+                         qvalueCutoff = 0.05, pAdjustMethod = "BH", minGSSize = 5, maxGSSize = 5000)
+    path_out@result <- merge(path_out@result, path_numgenes, by="ID", all.x=T) # add pathway gene counts
+    path_out@result$Gene_Pathway_Ratio <- path_out@result$Count/path_out@result$Pathway_Gene_Count # ratio enrichedgenes to num genes pathway
+    path_out@result <- path_out@result[order(path_out@result$p.adjust, decreasing = F),]
+    out[[db]] <- path_out@result
+  }
+  return(out)
+}
+
+```
+
+```{r}
+set.seed(123456)
+### run per tumor type
+pathway_out_tables <- list()
+for (tt in names(outlists)) {
+  print(tt)
+  
+  df <- outlists[[tt]]
+  
+  positivegenes <- df[is.na(df$Immune_Genes) & df$Prediction == "Positive", "Gene"]
+  negativegenes <- df[is.na(df$Immune_Genes) & df$Prediction == "Negative", "Gene"]
+  
+  pos_out <- run_pathway(genelist = positivegenes)
+  neg_out <- run_pathway(genelist = negativegenes)
+  
+  pathway_out_tables[[paste0(tt, "_positive")]] <- pos_out
+  pathway_out_tables[[paste0(tt, "_negative")]] <- neg_out
+}
+
+## run top genes with more than 3 cancer types
+# toppos <- posgenes_summary[is.na(posgenes_summary$Immune_Genes) & posgenes_summary$Count > 3, "Gene"]
+# topneg <- neggenes_summary[is.na(neggenes_summary$Immune_Genes) & neggenes_summary$Count > 3, "Gene"]
+# 
+# pos_out <- run_pathway(genelist = toppos)
+# neg_out <- run_pathway(genelist = topneg)
+
+
+### plot paths
+pathnames <- names(pathway_dbs)
+pathplot_tables <- list()
+pathplots <- list()
+outpath <- "pathwayplots/per tumor type/"
+
+# for (db in pathnames) {
+#   
+#   pathplot_tables[[db]] <- list()
+#   pathplots[[db]] <- list()
+#   for (tt in names(outlists)) {
+#     pospath <- paste0(tt, "_positive")
+#     negpath <- paste0(tt, "_negative")
+#     
+#     df_pos <- cbind(pathway_out_tables[[pospath]][[db]][1:10, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Positive"))
+#     df_neg <- cbind(pathway_out_tables[[negpath]][[db]][1:10, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Negative"))
+#     
+#     plotdf <- rbind(df_pos, df_neg)
+#     plotdf$logFDR <- -log10(plotdf$p.adjust)
+#     plotdf <- plotdf[plotdf$p.adjust < 0.1,]
+#     plotdf$Prediction <- factor(plotdf$Prediction, levels = c("Positive", "Negative"))
+#     plotdf <- plotdf[order(plotdf$Prediction, plotdf$logFDR),]
+#     plotdf$ID <- gsub("_"," ", plotdf$ID)
+#     plotdf$ID <- gsub("GOBP|GOCC|GOMF|HALLMARK|REACTOME", "", plotdf$ID)
+#     
+#     pathplot_tables[[db]][[tt]] <- plotdf
+#     
+#     plotdf$ID <- stringr::str_wrap(plotdf$ID, 50)
+#     p <- ggpar(ggbarplot(plotdf, x="ID", y="logFDR", fill="Prediction", alpha=0.8, width = 1,
+#                          palette = c("Positive"="#4a0101", "Negative"="#13473e"), xlab = "", ylab = "-log10(FDR)", title = tt), 
+#                orientation = "horiz", x.text.angle = 0) + theme_bw() + theme(axis.text.y = element_text(size = 6), title = element_text(size = 10))
+#     pathplots[[db]][[tt]] <- p
+#   }
+#   
+#   pdf(paste0(outpath, db, "_pathways.pdf"), width = 18, height = 9)
+#   print(annotate_figure(ggarrange(plotlist = pathplots[[db]], ncol = 3, nrow = 3, common.legend = T, legend = "right"), 
+#                         top = text_grob(gsub("_", " ", db), face = "bold", size = 16)))
+#   junk <- dev.off()
+#   
+# }
+
+###### dot plot with all tumor types 
+pathnames <- names(pathway_dbs)
+all_top_paths <- c()
+for (db in pathnames) {
+  
+  for (tt in names(outlists)) {
+    pospath <- paste0(tt, "_positive"); negpath <- paste0(tt, "_negative")
+    
+    pos_paths <- pathway_out_tables[[pospath]][[db]][pathway_out_tables[[pospath]][[db]]$p.adjust < 0.001, "ID"] 
+    neg_paths <- pathway_out_tables[[negpath]][[db]][pathway_out_tables[[negpath]][[db]]$p.adjust < 0.001, "ID"] 
+    all_top_paths <- unique(c(all_top_paths, pos_paths, neg_paths))
+  }
+}
+
+pathplot_tables <- list()
+pathplots <- list()
+for (db in pathnames) {
+  
+  pathplot_df <- data.frame()
+  for (tt in names(outlists)) {
+    pospath <- paste0(tt, "_positive"); negpath <- paste0(tt, "_negative")
+    df_pos <- cbind(pathway_out_tables[[pospath]][[db]][, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Positive"))
+    df_pos <- df_pos[df_pos$ID %in% all_top_paths, ]
+    
+    df_neg <- cbind(pathway_out_tables[[negpath]][[db]][, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Negative"))
+    df_neg <- df_neg[df_neg$ID %in% all_top_paths, ]
+    
+    plotdf <- cbind(rbind(df_pos, df_neg), Tumor_Type=rep(tt))
+    plotdf <- plotdf[order(plotdf$ID, plotdf$p.adjust, decreasing = F),]
+    plotdf <- plotdf[!duplicated(plotdf$ID),]
+    pathplot_df <- rbind(pathplot_df, plotdf)
+  }
+  
+  pathplot_df$logFDR <- -log10(pathplot_df$p.adjust)
+  pathplot_df$logFDR <- ifelse(pathplot_df$Prediction == "Negative", pathplot_df$logFDR*-1, pathplot_df$logFDR)
+  pathplot_df$Prediction <- factor(pathplot_df$Prediction, levels = c("Positive", "Negative"))
+  pathplot_df$Tumor_Type <- factor(pathplot_df$Tumor_Type, levels = unique(pathplot_df$Tumor_Type))
+  pathplot_df <- pathplot_df[order(pathplot_df$Tumor_Type, pathplot_df$Prediction, pathplot_df$ID),]
+  pathplot_df$ID <- gsub("_"," ", pathplot_df$ID)
+  pathplot_df$ID <- gsub("GOBP|GOCC|GOMF|HALLMARK|REACTOME", "", pathplot_df$ID)
+  
+  pathplot_tables[[db]] <- pathplot_df
+  
+  # plotting
+  maxval=round(quantile(pathplot_df$logFDR, 0.95))
+  minval=round(quantile(pathplot_df$logFDR, 0.05))
+  pathplot_df$logFDR_max <- ifelse(pathplot_df$logFDR > maxval, maxval,
+                                   ifelse(pathplot_df$logFDR < minval, minval, pathplot_df$logFDR))
+  getlowpaths <- pathplot_df %>% group_by(ID) %>% summarize(sum(abs(logFDR_max)))
+  top <- getlowpaths[getlowpaths$`sum(abs(logFDR_max))` > median(getlowpaths$`sum(abs(logFDR_max))`), "ID"]
+  pathplot_df <- pathplot_df[pathplot_df$ID %in% top$ID,]
+  pathplot_df$ID <- stringr::str_wrap(pathplot_df$ID, 50)
+  p <- ggplot(pathplot_df, aes(Tumor_Type, ID, col=logFDR_max, size=Gene_Pathway_Ratio)) +
+    geom_point() + labs(color = "Signed -log10(FDR)") + labs(shape = "Gene/Pathway Ratio") +
+    scale_color_gradient2(low = "blue", midpoint = 0, mid = "white", high = "red", 
+                          breaks=c(maxval, maxval/2, 0, minval/2, minval),
+                          labels = c(paste0("> ", maxval, " - positive predictors"), maxval/2, "0", 
+                                     minval/2, paste0("< ", minval, " - negative predictors")) )
+  
+  pdf(paste0("pathwayplots/dotplots/", db, "_toppaths.pdf"), width = 14, height = 10)
+  print(p)
+  junk <- dev.off()
+  
+  pathplots[[db]] <- p
+  
+}
+
+  
+###### try running with combined genes per groups?^^^^^^
+set.seed(123456)
+group_path_out <- list()
+for (group in unique(all_out_groups_rmimmune$Group)) {
+  print(group)
+  
+  df_group <- all_out_groups_rmimmune[all_out_groups_rmimmune$Group %in% group,]
+  
+  pos_out <- run_pathway(genelist = df_group[df_group$Prediction %in% "Positive", "Gene"])
+  neg_out <- run_pathway(genelist = df_group[df_group$Prediction %in% "Negative", "Gene"])
+  
+  group_path_out[[paste0(group, "_positive")]] <- pos_out
+  group_path_out[[paste0(group, "_negative")]] <- neg_out
+}
+
+# dotplots
+pathnames <- names(pathway_dbs)
+groups_all_top_paths <- c() #### getting top paths across all
+for (db in pathnames) {
+  
+  for (group in unique(all_out_groups_rmimmune$Group)) {
+    pospath <- paste0(group, "_positive"); negpath <- paste0(group, "_negative")
+    
+    pos_paths <- group_path_out[[pospath]][[db]][group_path_out[[pospath]][[db]]$p.adjust < 0.01, "ID"] 
+    neg_paths <- group_path_out[[negpath]][[db]][group_path_out[[negpath]][[db]]$p.adjust < 0.01, "ID"] 
+    groups_all_top_paths <- unique(c(groups_all_top_paths, pos_paths, neg_paths))
+  }
+}
+
+
+## plotting
+group_pathplot_tables <- list()
+group_pathplots <- list()
+for (db in pathnames) {
+  
+  pathplot_df <- data.frame()
+  for (group in unique(all_out_groups_rmimmune$Group)) {
+    
+    pospath <- paste0(group, "_positive"); negpath <- paste0(group, "_negative")
+    df_pos <- cbind(group_path_out[[pospath]][[db]][, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Positive"))
+    df_pos <- df_pos[df_pos$ID %in% groups_all_top_paths, ]
+    
+    df_neg <- cbind(group_path_out[[negpath]][[db]][, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Prediction=rep("Negative"))
+    df_neg <- df_neg[df_neg$ID %in% groups_all_top_paths, ]
+    
+    plotdf <- cbind(rbind(df_pos, df_neg), Group=rep(group))
+    plotdf <- plotdf[order(plotdf$ID, plotdf$p.adjust, decreasing = F),]
+    plotdf <- plotdf[!duplicated(plotdf$ID),]
+    pathplot_df <- rbind(pathplot_df, plotdf)
+  }
+  
+  pathplot_df$logFDR <- -log10(pathplot_df$p.adjust)
+  pathplot_df$logFDR <- ifelse(pathplot_df$Prediction == "Negative", pathplot_df$logFDR*-1, pathplot_df$logFDR)
+  pathplot_df$Prediction <- factor(pathplot_df$Prediction, levels = c("Positive", "Negative"))
+  pathplot_df$Group <- factor(pathplot_df$Group, levels = unique(pathplot_df$Group))
+  pathplot_df <- pathplot_df[order(pathplot_df$Group, pathplot_df$Prediction, pathplot_df$ID),]
+  pathplot_df$ID <- gsub("_"," ", pathplot_df$ID)
+  pathplot_df$ID <- gsub("GOBP|GOCC|GOMF|HALLMARK|REACTOME", "", pathplot_df$ID)
+  
+  pathplot_tables[[db]] <- pathplot_df
+  
+  # plotting
+  maxval=round(quantile(pathplot_df$logFDR, 0.95))
+  minval=round(quantile(pathplot_df$logFDR, 0.05))
+  pathplot_df$logFDR_max <- ifelse(pathplot_df$logFDR > maxval, maxval,
+                                   ifelse(pathplot_df$logFDR < minval, minval, pathplot_df$logFDR))
+  # getlowpaths <- pathplot_df %>% group_by(ID) %>% summarize(sum(abs(logFDR_max)))
+  # top <- getlowpaths[getlowpaths$`sum(abs(logFDR_max))` > median(getlowpaths$`sum(abs(logFDR_max))`), "ID"]
+  # pathplot_df <- pathplot_df[pathplot_df$ID %in% top$ID,]
+  pathplot_df$ID <- stringr::str_wrap(pathplot_df$ID, 50)
+  p <- ggplot(pathplot_df, aes(Group, ID, col=logFDR_max, size=Gene_Pathway_Ratio)) +
+    geom_point() + labs(color = "Signed -log10(FDR)") + labs(shape = "Gene/Pathway Ratio") +
+    scale_color_gradient2(low = "blue", midpoint = 0, mid = "white", high = "red", 
+                          breaks=c(maxval, maxval/2, 0, minval/2, minval),
+                          labels = c(paste0("> ", maxval, " - positive predictors"), maxval/2, "0", 
+                                     minval/2, paste0("< ", minval, " - negative predictors")) )
+  
+  pdf(paste0("pathwayplots/groups_dotplots/", db, "_toppaths.pdf"), width = 14, height = 10)
+  print(p)
+  junk <- dev.off()
+  
+  pathplots[[db]] <- p
+  
+}
+
+
+
+```
+
+
+```{r}
+### top pan can
+# pancan_plots <- list()
+# for (db in pathnames) {
+#   
+#   df_pos <- cbind(pos_out[[db]][1:10, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Group=rep("Positive"))
+#   df_neg <- cbind(neg_out[[db]][1:10, c("ID", "p.adjust", "Gene_Pathway_Ratio")], Group=rep("Negative"))
+#   
+#   plotdf <- na.omit(rbind(df_pos, df_neg))
+#   if ( anyDuplicated(plotdf$ID) > 0 ) {
+#     rmpath <- plotdf[duplicated(plotdf$ID),"ID"]
+#     plotdf <- plotdf[!plotdf$ID %in% rmpath,]
+#   }
+#   
+#   plotdf$logFDR <- -log10(plotdf$p.adjust)
+#   plotdf <- plotdf[plotdf$p.adjust < 0.1,]
+#   plotdf$Group <- factor(plotdf$Group, levels = c("Positive", "Negative"))
+#   plotdf <- plotdf[order(plotdf$Group, plotdf$logFDR),]
+#   plotdf$ID <- gsub("_"," ", plotdf$ID)
+#   plotdf$ID <- gsub("GOBP|GOCC|GOMF|HALLMARK|REACTOME", "", plotdf$ID)
+#   
+#   pathplot_tables[[db]][["Top_PanCan"]] <- plotdf
+#   
+#   plotdf$ID <- stringr::str_wrap(plotdf$ID, 50)
+#   p <- ggpar(ggbarplot(plotdf, x="ID", y="logFDR", fill="Group", alpha=0.8, width = 1,
+#                        palette = c("Positive"="#4a0101", "Negative"="#13473e"), xlab = "", ylab = "-log10(FDR)", title = db), 
+#              orientation = "horiz", x.text.angle = 0) + theme_bw() + theme(axis.text.y = element_text(size = 6), title = element_text(size = 10))
+#   
+#   if (nrow(plotdf) > 10) { w=8; h=5 } else { w=6; h=4}
+#   pdf(paste0("pathwayplots/top pancan/", db, "_pathways.pdf"), width = w, height = h)
+#   print(p)
+#   junk <- dev.off()
+#   
+#   pancan_plots[[db]] <- p
+# }
+# 
+# pdf("pathwayplots/top pancan/Top_PanCan_pathways.pdf", width = 18, height = 9)
+# ggarrange(plotlist = pancan_plots, ncol = 3, nrow = 3, common.legend = T, legend = "right")
+# dev.off()
+
+```
+
+
+```{r}
+# pdf("../DavoliLab/immune_evasion_project/TEST_Mario_Outputs_Compare/positive_predicted_genes_intersections.pdf", width = 10, height = 6)
+# posgenes %>%
+#   group_by(Gene) %>%
+#   summarize(TumorTypes = list(TumorType)) %>%
+#   ggplot(aes(x = TumorTypes)) +
+#     geom_bar() +
+#     scale_x_upset(n_intersections = 25) + theme_pubr() + ggtitle("Positive Predicted Genes Intersected between Tumor Types")
+# dev.off()
+# 
+# 
+# 
+# pdf("../DavoliLab/immune_evasion_project/TEST_Mario_Outputs_Compare/negative_predicted_genes_intersections.pdf", width = 10, height = 6)
+# neggenes %>%
+#   group_by(Gene) %>%
+#   summarize(TumorTypes = list(TumorType)) %>%
+#   ggplot(aes(x = TumorTypes)) +
+#     geom_bar() +
+#     scale_x_upset(n_intersections = 25) + theme_pubr() + ggtitle("Negative Predicted Genes Intersected between Tumor Types")
+# dev.off()
+```
+
+
+

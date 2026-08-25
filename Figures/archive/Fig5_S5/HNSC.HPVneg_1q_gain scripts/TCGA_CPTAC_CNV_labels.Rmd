@@ -1,0 +1,86 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# CNV (TCGA+ CPTAC)
+```{r}
+tcga <- readRDS("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/TCGA/scores/TCGA_working_tables.rds")
+names(tcga) # confirms what is inside 
+
+tcga_hnsc <- tcga[["HNSC.HPVneg_ArmCNV"]]  # Use HPV– subset
+
+# Create TCGA 1q gain label file with consistent columns
+tcga_labels <- data.frame(
+  Patient_ID = paste0(rownames(tcga_hnsc), "-tumor"),
+  Tumor = "HNSC",
+  Arm_1q_Gain = ifelse(tcga_hnsc$Arm1q > 0.2, 1, 0)
+)
+
+tcga_labels
+```
+
+
+
+```{r}
+cptac <- read.csv("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/cptac_pancan/Validation/CPTAC_PanCan_Arm_Level_CopyNumber_NORMALIZED.csv", 
+                  row.names = 1, check.names = FALSE)
+head(cptac)
+```
+
+```{r}
+
+# Filter only HNSCC rows
+cptac_hnsc <- cptac[cptac$TumorType == "HNSCC", ]
+
+# Convert rownames (patient IDs) to a column
+cptac_hnsc <- rownames_to_column(cptac_hnsc, "Patient_ID")
+cptac_hnsc
+
+# Generate label file: binary 1q gain
+cptac_labels <- cptac_hnsc %>%
+  mutate(
+    Tumor = "HNSC",
+    Arm_1q_Gain = ifelse(Arm_1q > 0.2, 1, 0)
+  ) %>%
+  select(Patient_ID, Tumor, Arm_1q_Gain)
+
+# Check it
+cptac_labels
+
+```
+
+
+```{r}
+# ==== Combine CPTAC + TCGA ====
+# Combine TCGA and CPTAC
+combined_labels <- bind_rows(cptac_labels, tcga_labels)
+
+# Preview
+combined_labels
+
+# Save to file
+write.csv(combined_labels, "combined_HNSC_Arm1qGain_labels.csv", row.names = FALSE)
+```
+
+# Tile 
+Check match with tile 
+```{r}
+library(tidyverse)
+
+# Load
+setwd("/Users/annabelshinichen/Desktop/SchoolWork/MSBMI/Davoli_lab/image_analysis")
+tiles <- read.csv("all_tiles.csv")
+labels <- read.csv("combined_HNSC_Arm1qGain_labels.csv")
+
+
+# Check match
+intersect_ids <- intersect(unique(tiles$Patient_ID), labels$Patient_ID)
+
+length(intersect_ids)       # number of matched patients
+length(unique(tiles$Patient_ID))  # total in all_tiles
+length(labels$Patient_ID)   # total in label file
+```
+
+Filter to only matched
+
